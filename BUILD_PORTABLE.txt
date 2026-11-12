@@ -1,0 +1,90 @@
+BUILD A PORTABLE VAERNETT WINDOWS ZIP
+===================================
+
+For the colleague
+-----------------
+1. Use 64-bit Windows 10 or Windows 11.
+2. Extract the entire ZIP into a writable local folder, not into Program Files.
+3. Double-click Vaernett.exe. Keep its console open while using the app.
+4. The default browser opens when the server is ready. If it does not, use the
+   http://127.0.0.1:PORT/ address printed in the console.
+5. Close the console to stop the app. No Python installation or API key is needed.
+
+Internet is still needed for basemap tiles, fonts, Leaflet and icons.
+The ZIP is not a completely offline map product.
+The application is unsigned. Your organisation may require IT approval to run it;
+do not bypass organisational security policy.
+Only send the package if you are permitted to share the bundled map datasets.
+
+Rebuild on this computer
+-----------------------
+Open PowerShell in the pipeline_v3 folder and run:
+
+  & ".\.venv-portable-build\Scripts\python.exe" -u build_portable.py
+
+The builder creates a timestamped ZIP in outputs and its working files under
+outputs/portable_build. Leave the ZIP beside the source project, not inside it.
+Use a clean Python 3.11 build environment, not the ArcGIS environment's inherited
+PyInstaller hooks. On this computer, initialise it once with:
+
+  & ".\.venv-seasonal-app\Scripts\python.exe" -m venv .venv-portable-build
+  & ".\.venv-portable-build\Scripts\python.exe" -m pip install -r requirements-portable-build.txt
+
+These are build-computer requirements only. The colleague installs nothing.
+
+Before rebuilding, finish any model training and separately prepare the relevant
+1 km Frost and SVV surfaces. The builder does not download data, train models,
+or compute missing surfaces. A fresh rebuild snapshots the ready models found
+at build time. See the printed INCLUDED/SKIP lines and build_manifest.json.
+Temperature seNorge30 must have a ready baseline and SVV colour reference.
+Other unavailable models are omitted and listed in READ_ME_FIRST.txt.
+
+For example, after precipitation training finishes, prepare it separately:
+
+  & ".\.venv-seasonal-app\Scripts\python.exe" -u precompute_frost.py --phenomenon precipitation --kind class --cell-m 1000 --station-network both
+
+Then rerun build_portable.py to include it in a fresh ZIP. Do not reuse the old
+stage when you want updated model data.
+
+Optional two-stage build
+------------------------
+Prepare just the data snapshot:
+
+  & ".\.venv-portable-build\Scripts\python.exe" -u build_portable.py --name MyBuild --stage-only
+
+Build using that exact snapshot, without reading the observations again:
+
+  & ".\.venv-portable-build\Scripts\python.exe" -u build_portable.py --name MyBuild --reuse-stage outputs/portable_build/MyBuild/data
+
+What is included
+----------------
+* A self-contained executable and its Python runtime/native libraries.
+* Ready selected models, their observing station lists, and baseline surfaces.
+* The 1 km terrain grid, Norway polygon, county polygons, road score network,
+  climate-zone raster and cold-basin polygon layer.
+* The app HTML/JavaScript, third-party notices and a build-time model manifest.
+* Interactive own-station placement and existing-station scenarios.
+
+What is deliberately omitted
+-----------------------------
+* The large frost_history.db and raw weather observations.
+* API credentials, training inputs, raw seNorge data and DTM source tiles.
+* The old proposed/greedy-network model and saved greedy replay surfaces.
+* Coarser-resolution maps and experimental CNN/GPU/footprint pages.
+* Development tools, tests, torch and the original virtual environment.
+
+Size and checks
+----------------
+The trained models and real map geometry dominate the size. Their parameters
+are compressed without reducing precision or simplifying scientific results.
+Working files require additional disk space while building.
+The builder runs Vaernett.exe --smoke-test before it writes the ZIP. A failing
+smoke test stops the build. It checks startup, weather/map endpoints, county
+and road metadata, bundled models and an interactive station prediction.
+For an existing extracted build you can run that same command in its folder.
+
+After sharing
+-------------
+The colleague's scenarios are local to the running app/browser session. The
+package contains a fixed data/model snapshot, not an automatically updating
+Frost connection. Send a newly built ZIP when the models need updating.

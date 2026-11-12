@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Station lab | National predicted uncertainty</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif}header{padding:14px;display:flex;gap:20px;flex-wrap:wrap}
+main{display:grid;grid-template-columns:390px 1fr;height:calc(100dvh - 50px)}aside{padding:18px;overflow:auto}
+label{display:block;font-weight:600;margin:14px 0 5px}select,button{padding:8px;width:100%;font:inherit}
+input[type=checkbox]{width:auto}
+.warning{padding:12px;background:#fff2cc;line-height:1.5}#map{height:100%;background:#eee}
+#error{color:#a00}table{border-collapse:collapse;width:100%;font-size:12px}td,th{padding:5px;border-bottom:1px solid #ddd;text-align:left}
+.leaflet-tile-pane{filter:grayscale(100%)}.legend{padding:12px;background:white}
+.native-prediction-tile{image-rendering:pixelated}
+#export[aria-disabled=true]{pointer-events:none;color:#777}
+@media(max-width:800px){main{display:block;height:auto}aside{max-height:60vh}#map{height:65vh}}
+</style></head><body>
+<header><strong>National predicted uncertainty &middot; native 1 km</strong>
+<a href="/senorge-network">New seNorge Frost network RMSE</a>
+<a href="/senorge-transfer">New seNorge GPU map (virtual reference)</a>
+<a href="/temperature-map">Single-source map</a><a href="/model-evaluation">Held-out evaluations</a></header>
+<main><aside>
+<p class="warning" id="warning">Loading verified joint model ...</p>
+<label for="day">Archived winter day</label><select id="day" disabled></select>
+<label for="hour">UTC hour</label><select id="hour"><option value="0">00 UTC</option><option value="3" selected>03 UTC</option><option value="6">06 UTC</option></select>
+<button id="prepare" disabled>Predict uncertainty across Norway</button>
+<p id="status" role="status"></p><p id="error" role="alert"></p>
+<p><strong>Click a station on the map to remove its reading.</strong>
+Green dots have a QC reading at the prediction time. Grey dots have no selected-sensor QC reading and cannot be removed from this prediction.</p>
+<label><input id="show-stations" type="checkbox" checked> Show all stations</label>
+<button id="restore-network">Restore all station readings</button>
+<p id="station-selection" role="status"></p>
+<label for="metric">National map colours</label><select id="metric">
+<option value="radius_c">Predicted interval radius (&plusmn; &deg;C), NOT RMSE</option>
+<option value="temperature_c">Joint predicted temperature (&deg;C)</option>
+<option value="source_count">Connected observed source count</option></select>
+<label for="removed-station">Remove one observed station reading</label>
+<select id="removed-station" disabled><option value="">Full network (no removal)</option></select>
+<label for="scenario">Station-removal map</label><select id="scenario" disabled>
+<option value="change">CHANGE: without station minus full network</option>
+<option value="without">Prediction WITHOUT selected station</option>
+<option value="full">Full-network prediction (comparison)</option></select>
+<p id="removal-summary" role="status"></p>
+<details><summary>Why can the predicted radius decrease?</summary>
+<p>The learned error model is not monotonic in station count. Removing a reading changes
+the joint temperature, source disagreement and error-model inputs. It can therefore predict
+a narrower interval. This is not proof of improved accuracy or evidence that the station is bad:
+the model did not achieve its 90% nightly coverage target. Blue means a smaller predicted
+radius, not a validated benefit. We retain these outputs rather than forcing every removal
+to increase uncertainty.</p></details>
+<a id="removal-export" hidden>Download WITHOUT-station scenario (1 km GeoTIFF)</a>
+<button id="national">Show Norway</button>
+<p id="summary"></p><p id="resolution"></p>
+<p>The same native 1 km prediction raster is rendered at every zoom, without switching
+to larger aggregate blocks. Click a supported land location to inspect its exact cell;
+clicking does not change zoom. Unsupported cells and sea remain transparent.</p>
+<a id="export" aria-disabled="true">Download nationwide 1 km GeoTIFF (temperature, radius, bounds, source count)</a>
+<h3>Click a predicted 1 km cell</h3><div id="detail">Zoom in and click a cell to see its source readings and signed station-removal effects.</div>
+</aside><div id="map"></div></main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script src="/national_joint_map.js"></script>
+</body></html>

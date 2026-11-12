@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Station lab | Verified model evaluation</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    *{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;color:#222}
+    header{padding:14px;border-bottom:1px solid #ccc;display:flex;gap:20px;flex-wrap:wrap}
+    main{display:grid;grid-template-columns:430px 1fr;height:calc(100dvh - 50px)}
+    aside{padding:18px;overflow:auto}label{display:block;margin:12px 0 5px;font-weight:600}
+    select,button{width:100%;padding:8px;font:inherit}.warning{background:#fff2cc;padding:12px;line-height:1.5}
+    #map{height:100%;background:#eee}#error{color:#a00;white-space:pre-line}
+    table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12px}
+    th,td{text-align:left;padding:5px;border-bottom:1px solid #ddd}th{vertical-align:bottom}
+    #detail{overflow-x:auto}.source{cursor:pointer}.source:hover{background:#edf5ff}
+    .leaflet-tile-pane{filter:grayscale(100%)}.legend{padding:12px;background:white;max-width:210px}
+    .ramp{height:12px;margin:6px 0}#export[aria-disabled=true]{pointer-events:none;color:#777}
+    @media(max-width:800px){main{display:block;height:auto}aside{max-height:60vh}#map{height:65vh}}
+  </style>
+</head>
+<body>
+  <header><strong>Verified held-out model evaluation</strong>
+    <a href="/senorge-transfer">New seNorge GPU map (virtual reference)</a>
+    <a href="/national-uncertainty">National predicted uncertainty</a>
+    <a href="/temperature-map">Temperature prediction map</a><a href="/footprint">Footprint</a></header>
+  <main><aside>
+    <p class="warning">Evaluation samples only. Blank areas have no evaluated predictions.
+      This is not a live forecast or a nationwide validated uncertainty map.
+      The models use different datasets and targets; their RMSEs are not a head-to-head comparison.</p>
+    <label for="model">Model</label><select id="model" disabled>
+      <option value="joint">Joint stations + MEPS &middot; interval radius</option>
+      <option value="senorge">seNorge grid transfer &middot; corrected RMSE</option>
+    </select>
+    <label for="split">Evaluation split</label><select id="split" disabled></select>
+    <label for="date">Evaluated date</label><select id="date" disabled></select>
+    <div id="hour-control"><label for="hour">UTC time</label><select id="hour">
+      <option value="0">00 UTC</option><option value="3" selected>03 UTC</option><option value="6">06 UTC</option>
+    </select></div>
+    <div id="variable-control" hidden><label for="variable">seNorge temperature</label><select id="variable">
+      <option value="0">Daily mean (tg)</option><option value="1">Daily minimum (tn)</option>
+    </select><label for="source">Source grid cell</label><select id="source"></select></div>
+    <label for="metric">Map colours</label><select id="metric"></select>
+    <label for="target">Evaluated target (or click the map)</label><select id="target" disabled>
+      <option value="">Select a target to zoom and inspect</option>
+    </select>
+    <button id="national">Zoom to evaluated locations</button>
+    <p id="warning" class="warning"></p>
+    <p id="status" role="status"></p><p id="error" role="alert"></p>
+    <h3>Whole test set</h3><div id="overall"></div>
+    <details><summary>Regional and predicted-error diagnostics</summary><div id="diagnostics"></div></details>
+    <h3>Selected map samples</h3><div id="summary"></div><p id="aggregation"></p>
+    <a id="export" aria-disabled="true">Download selected evaluation rows (CSV)</a>
+    <h3>Click a target on the map</h3><div id="detail">Select a station or 1 km grid cell.</div>
+  </aside><div id="map"></div></main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/station_model_evaluation.js"></script>
+</body>
+</html>

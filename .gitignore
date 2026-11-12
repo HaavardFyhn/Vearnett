@@ -1,0 +1,12 @@
+data/
+outputs/
+.venv*/
+__pycache__/
+.pytest_cache/
+cachedir/
+frost_db_report/
+frost_element_updates/
+*.db*
+*.log
+*.mp4
+.env*

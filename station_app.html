@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Værnett</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ned 45deg, venstre 135deg, opp 225deg, høyre 315deg. */
+    :root{
+      --panel-arrow-collapsed:45deg;
+      --panel-arrow-expanded:315deg;
+    }
+    :root{--ink:#202b29;--muted:#697470;--line:#dce2de;--paper:#fff;--green:#146b4b;--soft:#edf5ef;--accent:#cf5d2c;--error:#a42a32}
+    *{box-sizing:border-box;letter-spacing:0}body{margin:0;font-family:'IBM Plex Sans',sans-serif;color:var(--ink);background:#f5f7f5}button,input,select{font:inherit}button,a,input{touch-action:manipulation}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid #58a98a;outline-offset:2px}button svg,a svg{width:17px;height:17px;flex-shrink:0}header{height:66px;display:flex;align-items:center;gap:14px;padding:0 22px;border-bottom:1px solid var(--line);background:var(--paper)}.brand-icon{width:32px;height:36px;display:grid;place-items:center;color:var(--green)}h1{font-size:22px;margin:0;font-weight:600}.domain{font-size:12px;color:var(--muted);border-left:1px solid var(--line);padding-left:16px}.header-right{margin-left:auto;display:flex;align-items:center;gap:16px}.connection{font-size:12px;display:flex;gap:7px;align-items:center;color:var(--muted)}.status-dot{width:7px;height:7px;border-radius:50%;background:#378565}.busy .status-dot{background:#d28b25;animation:pulse 1s infinite}.export{display:flex;align-items:center;gap:8px;text-decoration:none;color:var(--green);font-size:13px;font-weight:600;padding:9px 11px;border:1px solid var(--line);border-radius:4px}.export:hover{background:var(--soft)}.export[aria-disabled="true"]{opacity:.4;pointer-events:none}main{display:grid;grid-template-columns:314px minmax(0,1fr);height:calc(100dvh - 66px)}aside{background:var(--paper);border-right:1px solid var(--line);overflow-y:auto;z-index:500}.section{padding:20px;border-bottom:1px solid var(--line)}.section-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px}h2{font-size:13px;font-weight:600;margin:0}.eyebrow{text-transform:uppercase;font-size:10px;letter-spacing:0;color:var(--muted);font-weight:600}.count{font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--soft);padding:3px 6px;border-radius:3px;color:var(--green)}label{font-size:12px;color:var(--muted)}.field{display:flex;align-items:center;justify-content:space-between;gap:12px}.field+.field{margin-top:13px}.input-wrap{display:flex;align-items:center;gap:7px}.input-wrap span{color:var(--muted);font-size:11px}input[type=number]{width:84px;min-width:0;border:1px solid #bcc8c0;border-radius:3px;padding:7px 7px;background:#fff;color:var(--ink);font-size:13px;font-family:'IBM Plex Mono',monospace}input[type=range]{width:105px;accent-color:var(--green)}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:18px 12px}.metric .value{font-size:26px;font-weight:500;line-height:1.2;font-family:'IBM Plex Mono',monospace;white-space:nowrap}.metric .unit{font-size:11px;color:var(--muted);margin-left:3px}.metric .caption{font-size:11px;color:var(--muted);margin-top:5px}.metric.area{grid-column:1/-1;padding-top:13px;border-top:1px solid var(--line)}.metric.area .value{font-size:21px}.delta{color:var(--green)}.tools{display:flex;gap:5px}.icon-button{display:inline-grid;place-items:center;padding:0;background:#fff;color:var(--muted);border:1px solid var(--line);border-radius:4px}.icon-button:hover{color:var(--green);background:var(--soft)}.station-list{list-style:none;padding:0;margin:0}.station{display:grid;grid-template-columns:25px minmax(0,1fr) 29px;gap:9px;padding:11px 0;border-bottom:1px solid #edf0ee;align-items:center}.station:last-child{border-bottom:0}.station-number{width:24px;height:24px;display:grid;place-items:center;color:#fff;background:var(--accent);border-radius:50%;font-size:11px;font-weight:600}.station strong{font-size:12px;font-weight:500;display:block}.station small{font-family:'IBM Plex Mono',monospace;color:var(--muted);font-size:10px;display:block;margin-top:4px}.station .icon-button{width:28px;height:28px;border:0}.empty{font-size:12px;color:var(--muted);padding:12px 0}.model-note{padding:16px 20px;color:var(--muted);font-size:10px;line-height:1.6}.model-note span{display:block}.map-region{position:relative;min-width:0;min-height:0}#map{height:100%;width:100%;background:#e7eeea}.leaflet-container{font-family:'IBM Plex Sans',sans-serif}.leaflet-container:not(.busy){cursor:crosshair}.map-toolbar{position:absolute;left:16px;right:64px;top:16px;z-index:600;display:flex;align-items:center;justify-content:space-between;gap:10px;pointer-events:none}.modes{display:flex;pointer-events:auto;background:#fff;border:1px solid #cbd5ce;border-radius:5px;padding:3px;box-shadow:0 2px 8px #223d2510}.modes button{font-size:12px;padding:8px 11px;border:0;border-radius:3px;background:transparent;color:var(--muted);white-space:nowrap}.modes button[aria-pressed=true]{background:var(--green);color:white}.map-toolbar .icon-button{pointer-events:auto;width:36px;height:36px}.legend{position:absolute;z-index:600;left:16px;bottom:26px;background:#fffffff5;min-width:230px;padding:13px 15px;border:1px solid #cbd5ce;border-radius:4px;box-shadow:0 2px 10px #223d2510}.legend-title{font-size:11px;font-weight:600;margin-bottom:8px}.ramp{height:8px;border-radius:1px;background:linear-gradient(to right,#4268ae,#a4d7e8,#fefec0,#f8a562,#ae0d27)}.ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-family:'IBM Plex Mono',monospace;margin-top:5px}.marker-key{display:flex;gap:14px;align-items:center;font-size:10px;color:var(--muted);margin-top:11px}.key-dot{width:7px;height:7px;display:inline-block;border-radius:50%;margin-right:4px;background:#45524e}.key-dot.manual{background:var(--accent)}.new-pin{border:2px solid #fff;background:var(--accent);color:white;width:24px;height:24px;line-height:20px;text-align:center;border-radius:50%;font:600 11px/20px 'IBM Plex Sans',sans-serif;box-shadow:0 0 0 1px #9c3d1b,0 2px 4px #0003}.message{position:absolute;left:16px;right:16px;top:72px;z-index:700;background:#fff5f4;border:1px solid #e5b5b7;color:var(--error);border-radius:4px;padding:11px 12px;display:flex;align-items:center;gap:10px;font-size:12px;box-shadow:0 2px 10px #0001}.message[hidden]{display:none}.message span{flex:1}.message button{border:0;background:none;color:inherit;padding:0;display:grid;place-items:center}.loading-bar{position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#146b4b00,#24875c,#146b4b00);background-size:200% 100%;z-index:1000;display:none}.busy .loading-bar{display:block;animation:loading 1.4s linear infinite}.mobile-stats{display:none}.leaflet-control-attribution{font-size:9px!important}.leaflet-control-zoom a{color:var(--ink)!important}.loading-shell{opacity:.55} @keyframes pulse{50%{opacity:.3}}@keyframes loading{to{background-position:-200% 0}}@media(max-width:850px){.domain{display:none}.map-toolbar{right:62px}.modes button{font-size:11px;padding:8px}.connection{max-width:160px}.header-right{gap:8px}}@media(max-width:620px){header{height:56px;padding:0 12px;gap:7px}h1{font-size:19px}.brand-icon{width:27px}.connection{display:none}.export{font-size:11px;padding:7px 9px}main{height:calc(100dvh - 56px);grid-template-columns:1fr;grid-template-rows:minmax(240px,1fr) minmax(180px,39dvh)}aside{grid-row:2;border-right:0;border-top:1px solid var(--line)}.map-region{grid-row:1}.section{padding:15px 18px}.metrics{gap:10px 12px;grid-template-columns:1fr 1fr 1.5fr}.metric .value{font-size:20px}.metric.area{grid-column:auto;border-top:0;border-left:1px solid var(--line);padding:0 0 0 10px}.metric.area .value{font-size:13px;white-space:normal;overflow-wrap:anywhere}.section-top{margin-bottom:11px}.map-toolbar{left:9px;top:9px;right:54px}.modes{padding:2px}.modes button{font-size:10px;padding:8px 7px}.map-toolbar>.icon-button{display:none}.legend{left:9px;bottom:20px;min-width:180px;padding:9px 11px}.legend-title{font-size:10px;margin-bottom:5px}.marker-key{font-size:9px;margin-top:7px}.message{left:9px;right:9px;top:56px}.model-note{padding:13px 18px}.leaflet-control-zoom{margin:9px!important}}@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+    select{max-width:185px;min-width:0;border:1px solid #bcc8c0;background:#fff;border-radius:3px;padding:7px;color:var(--ink);font-size:12px}.weather-modes{margin-top:12px;width:100%}.weather-modes button{flex:1}.data-note{font-size:10px;line-height:1.6;color:var(--muted);margin-top:10px;overflow-wrap:anywhere}.field[hidden],.data-note[hidden]{display:none}.hover-option{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:12px;margin-bottom:14px}.hover-option input{accent-color:var(--green);width:15px;height:15px}.leaflet-tile-pane{filter:grayscale(1)}.preview-badge{font-size:10px;color:#a30060;border:1px solid #efb7d7;background:#fff0f8;padding:2px 5px;border-radius:3px}.preview-badge[hidden]{display:none}.long-unit{display:block;margin:2px 0 0!important}.metric{min-width:0}.metric .caption{overflow-wrap:anywhere}.metric .value{font-size:24px}.metric.area .value{font-size:21px}@media(max-width:620px){.metric .value{font-size:20px}.metric.area .value{font-size:13px}select{max-width:210px}.weather-modes{width:100%}}
+    .section-top{flex-wrap:wrap}.station-select{border:0;background:none;padding:0;text-align:left;min-width:0;color:var(--ink);cursor:pointer}.station-select:hover{color:var(--green)}.station-select[aria-pressed=true]{color:var(--green);font-weight:600}.new-pin.selected{border-color:#edb138;box-shadow:0 0 0 2px #253b32}.marker-key{flex-wrap:wrap}.key-dot.selected{background:#253b32;border:1px solid #edb138}.selection-field{display:block}.selection-field label{display:block;margin-bottom:7px}.selection-field select{width:100%;max-width:100%}.resolution-field{margin-top:13px}#selected-description{min-height:16px}.metric.area .value{font-size:24px}@media(max-width:620px){.metric.area .value{font-size:20px}h1{font-size:18px}.export{white-space:nowrap}.legend-title{max-width:220px}}
+    .precompute-status{margin-top:12px;font-size:11px;color:var(--muted);line-height:1.6}.precompute-status progress{width:100%;height:8px;accent-color:var(--green);display:block;margin:7px 0}.precompute-status details{margin-top:7px}.precompute-status summary{cursor:pointer}.precompute-status ul{padding:0 0 0 14px;margin:7px 0;max-height:180px;overflow:auto}.precompute-status li{margin:4px 0;font-size:10px}.precompute-status[hidden],.data-note[hidden]{display:none}
+    .road-toggle{display:flex;gap:7px;align-items:center;font-size:12px;color:var(--ink)}.road-toggle input,.road-filters input[type=checkbox]{accent-color:var(--green)}.road-filters summary{font-size:12px;cursor:pointer;margin:10px 0}.road-filters fieldset{border:0;padding:0;margin:12px 0}.road-filters legend{font-size:11px;color:var(--muted);margin-bottom:7px}.road-options{display:grid;grid-template-columns:1fr 1fr;gap:7px}.road-options label{display:flex;align-items:center;gap:5px;font-size:11px;min-width:0}.road-classes{grid-template-columns:repeat(3,1fr)}.road-options input{margin:0;width:13px;height:13px}.road-filters input[type=text]{width:140px;min-width:0;border:1px solid #bcc8c0;border-radius:3px;padding:7px;font-size:12px}.road-filters .field{margin-top:10px}.road-actions{display:flex;gap:4px;margin-top:7px}.road-actions .icon-button{width:27px;height:27px}.road-statistics{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.road-statistics strong{font:500 15px 'IBM Plex Mono',monospace;display:block}.road-statistics span{font-size:10px;color:var(--muted)}.road-status{font-size:10px;color:var(--muted);line-height:1.6;margin-top:10px;overflow-wrap:anywhere}.road-status.warning{color:#a04a12}.road-ranking{margin:12px 0 0;padding:0;list-style:none}.road-ranking button{width:100%;border:0;border-top:1px solid #edf0ee;background:none;color:var(--ink);font-size:11px;display:flex;justify-content:space-between;gap:9px;padding:9px 0;text-align:left}.road-ranking button:hover{color:var(--green)}.road-ranking small{font-family:'IBM Plex Mono',monospace;white-space:nowrap}.road-popup{font-size:12px;line-height:1.6;min-width:200px}.road-popup strong{display:block;margin-bottom:4px}.road-popup dl{display:grid;grid-template-columns:auto auto;gap:3px 12px;margin:8px 0}.road-popup dt{color:var(--muted)}.road-popup dd{margin:0;text-align:right}.road-popup button{display:flex;align-items:center;gap:7px;background:var(--green);color:white;border:0;border-radius:3px;padding:8px 10px;margin-top:10px}.road-popup button svg{width:15px;height:15px}.road-popup small{color:var(--muted);display:block}.road-metric-unit{font-size:10px;color:var(--muted);margin-top:6px}#road-panel[hidden]{display:none}
+    .map-toolbar .modes{min-width:0;overflow-x:auto;scrollbar-width:thin}.map-toolbar .modes button{flex-shrink:0}.map-tools{display:flex;gap:5px;flex-shrink:0}.marker-key[hidden]{display:none}@media(max-width:620px){.map-tools #fit{display:none}}
+    #terrain-layer{max-width:100%;width:100%}.terrain-popup{min-width:230px}.terrain-popup .active-terrain{font-weight:600;color:var(--green)}.terrain-popup .cell-note{font-size:10px;color:var(--muted);margin-top:8px}.road-popup button.secondary{background:#edf5ef;color:var(--green)}.ticks [hidden]{display:none}
+    @media(max-width:340px){header{padding:0 8px;gap:6px}h1{font-size:17px}.brand-icon{width:24px}.export{width:32px;height:32px;padding:7px;justify-content:center;gap:0}.export-label{display:none}.section{padding:15px 18px}.field{flex-wrap:wrap;row-gap:6px}.field label{min-width:0}.field select{max-width:100%}.input-wrap{max-width:100%;flex-shrink:1}#threshold{width:72px}.weather-modes{flex-wrap:wrap}.weather-modes button{flex:1 1 100%}.map-toolbar{left:6px;gap:4px}.map-toolbar .modes{min-width:0;overflow-x:auto;scrollbar-width:thin}.map-toolbar .modes button{flex:0 0 auto}.map-tools{flex-shrink:0}.metrics{grid-template-columns:1fr 1fr}.metric.area{grid-column:1/-1;border-left:0;border-top:1px solid var(--line);padding:10px 0 0}.legend{min-width:0;max-width:calc(100% - 18px)}.legend-title{overflow-wrap:anywhere}.road-statistics{grid-template-columns:1fr}.road-ranking button{flex-wrap:wrap}.road-ranking small{white-space:normal}.road-popup{min-width:0}}
+    @media(max-width:340px){.road-options{grid-template-columns:1fr}.road-classes{grid-template-columns:1fr 1fr}}
+    .station-control{display:flex;align-items:center;gap:5px}.station-control select{flex:1;min-width:0;max-width:none}.station-control .icon-button{flex:0 0 30px}#frost-edit-status{min-height:0}.frost-pin{background:#075d96;border:2px solid #fff;border-radius:50%;box-shadow:0 1px 5px #202b29;cursor:grab}.frost-pin.selected{background:#253b32;border-color:#edb138}.frost-pin.locked{cursor:pointer;opacity:.72}
+    .frost-pin.removed{background:#929995;cursor:pointer}.frost-pin.removed.selected{background:#929995;border-color:#edb138}
+    .comparison-tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px}.comparison-tabs button{flex:1;padding:8px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--muted);font-size:12px}.comparison-tabs button[aria-selected=true]{background:var(--green);color:#fff}.comparison-tabs[hidden]{display:none}
+    .station-inspection p{margin:6px 0}.station-inspection strong{font-size:14px}.station-inspection .inspection-error{font-weight:500}.station-inspection details{margin:12px 0}.station-inspection summary{cursor:pointer;color:var(--green)}.station-inspection table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}.station-inspection th,.station-inspection td{padding:4px 5px;border-bottom:1px solid var(--line);text-align:right}.station-inspection th:first-child{text-align:left;font-weight:400}.inspection-station-label{font-weight:600;border:2px solid #edb138;width:max-content;max-width:230px;white-space:normal}.station-inspection button{width:100%;justify-content:center}
+    .inspection-drag-handle{cursor:grab;touch-action:none;user-select:none;color:var(--muted);font-size:11px;padding:4px 20px 8px 0}.inspection-drag-handle:focus-visible{outline:2px solid var(--green);outline-offset:2px}.inspection-dragging,.inspection-dragging .inspection-drag-handle{cursor:grabbing}.inspection-runner{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}.station-inspection .inspection-runner strong{font-size:12px}
+    .inspection-runner-label{border-color:#7851a9}.station-inspection table th:nth-child(3){color:#075d96}.station-inspection table th:nth-child(4){color:#7851a9}.station-inspection details{overflow-x:auto}
+    .frost-pin.original,.frost-pin.original.selected{background:#929995;cursor:pointer}.frost-pin.original.selected{border-color:#edb138}.station-move-arrow{background:none;border:0;pointer-events:none}
+    .weather-modes{flex-wrap:wrap;gap:3px}.weather-modes button{flex:1 1 calc(50% - 3px);min-width:0;white-space:normal}
+    .catalog-section{position:relative}.catalog-details>summary{display:flex;align-items:center;gap:8px;list-style:none;cursor:pointer;font-size:13px;font-weight:600;line-height:24px;margin:0;color:var(--ink)}.catalog-details>summary::-webkit-details-marker{display:none}.catalog-details>summary::before{content:"";width:6px;height:6px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;flex:0 0 6px;margin-right:2px}.catalog-content{margin-top:14px}.catalog-tools{position:absolute;right:20px;top:20px;display:flex;align-items:center;gap:8px}.catalog-section:has(.catalog-tools)>.catalog-details>summary{padding-right:86px}.catalog-details .catalog-count{font-size:11px;font-weight:400;color:var(--muted);margin-left:auto}.catalog-details #network{max-width:100%}@media(max-width:620px){.catalog-tools{right:18px;top:15px}}
+  </style>
+  <style>.export[hidden]{display:none}
+    .catalog-details>summary::before{transform:rotate(var(--panel-arrow-collapsed))}
+    .catalog-details[open]>summary::before{transform:rotate(var(--panel-arrow-expanded))}
+    .score-components{margin-top:12px}.score-bar{display:flex;height:20px;overflow:hidden;border-radius:4px;background:#edf0ee}.score-segment{min-width:0}.score-key{display:grid;grid-template-columns:1fr 1fr;gap:5px 12px;margin-top:8px}.score-key span{display:flex;align-items:center;gap:6px}.score-key i{width:9px;height:9px;border-radius:50%;flex:none}.score-components p{font-size:11px;color:var(--muted);margin:7px 0}
+    .phenomena{display:grid;gap:6px;border:0;padding:0;margin:0}.phenomena legend{font-size:12px;color:var(--muted);margin-bottom:6px;padding:0}
+    .phenomena label{display:flex;gap:7px;align-items:center;font-size:12px;color:var(--ink)}.phenomena small{color:var(--muted)}
+    .phenomena label.unavailable{opacity:.45}.phenomena label[hidden]{display:none}
+    .sensor-pie{display:block;width:100%;height:100%;border-radius:50%}.sensor-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:middle}
+    .inactive-sensors .sensor-pie{position:relative}.inactive-sensors .sensor-pie::after{content:'';position:absolute;inset:0;background:rgb(255 255 255 / var(--inactive-station-alpha));border-radius:inherit}.inactive-sensors .new-pin-pie{opacity:calc(1 - var(--inactive-station-alpha))}
+    .sensor-added{font-weight:600}.sensor-added .sensor-dot{outline:2px solid #146b4b;outline-offset:2px}.sensor-added small{margin-left:7px;color:#146b4b}
+    .sensor-key{gap:9px;margin-top:6px}.station-popup,.add-popup{font-size:12px;min-width:190px}.station-popup ul{list-style:none;margin:6px 0;padding:0}.station-popup li{margin:3px 0}
+    .add-popup label{display:flex;align-items:center;gap:6px;margin:4px 0;color:var(--ink)}.popup-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:8px}.popup-actions button{padding:4px 10px;cursor:pointer}
+    .station-sensors{display:block;margin-top:2px}
+    #rmse-min-value{display:inline-block;width:24px;height:16px;border:1px solid #bcc8c0;border-radius:3px;vertical-align:middle;margin-left:5px}
+    #station-visibility{width:120px;min-width:120px;height:36px;padding:0 10px;font-size:12px;white-space:nowrap}
+    .inspection-third-label{border-color:#16845c}.station-inspection table th:nth-child(5){color:#16845c}
+    @media(max-width:620px){.map-toolbar{flex-wrap:wrap;align-items:flex-start}.map-toolbar .modes{max-width:100%}.map-tools{margin-left:auto}}
+    .load-status{display:grid;gap:4px;width:280px;max-width:60%;font-size:12px;color:var(--muted)}.load-status progress{width:100%;height:7px;accent-color:var(--green)}.load-status progress[hidden]{display:none}.load-status[aria-busy=true]{color:var(--ink)}
+    .new-pin-pie{display:block;width:100%;height:100%;border-radius:50%;text-shadow:0 0 2px #000,0 0 3px #000}
+    .frost-pin.svv{border-radius:3px}.frost-pin.svv:not(.selected){border-color:#111}.frost-pin.svv .sensor-pie{border-radius:1px}.svv-key{display:inline-block;width:8px;height:8px;border:2px solid #111;border-radius:2px;background:#fff;margin-right:5px;vertical-align:middle}</style>
+  <style>
+    :root{
+      --inactive-station-alpha:0.0;
+      --station-size:14px;
+      --station-border-width:2px;
+      --station-border-style:solid;
+      --station-border-colour:#000000;
+      --station-radius:50%;
+      --station-shadow:0 1px 5px #202b29;
+      --station-opacity:1;
+      --station-outline:0 solid transparent;
+      --station-outline-offset:1px;
+    }
+    .frost-pin,.new-pin{
+      box-sizing:border-box;
+      width:var(--station-size)!important;
+      height:var(--station-size)!important;
+      margin-left:calc(var(--station-size) / -2)!important;
+      margin-top:calc(var(--station-size) / -2)!important;
+      border:var(--station-border-width) var(--station-border-style) var(--station-border-colour)!important;
+      border-radius:var(--station-radius)!important;
+      box-shadow:var(--station-shadow)!important;
+      opacity:var(--station-opacity)!important;
+      outline:var(--station-outline);
+      outline-offset:var(--station-outline-offset);
+      padding:0;
+    }
+    .frost-pin .sensor-pie,.new-pin .new-pin-pie{border-radius:inherit}
+    .new-pin .new-pin-pie{display:grid;place-items:center;line-height:normal}
+
+    .frost-pin:not(.svv){
+      --station-size:14px;
+      --station-border-width:2px;
+      --station-border-style:solid;
+      --station-border-colour:#000000;
+      --station-radius:50%;
+    }
+    .frost-pin.svv{
+      --station-radius:3px;
+      --station-border-colour:#111;
+    }
+    .new-pin{
+      --station-size:24px;
+      --station-shadow:0 0 0 1px #9c3d1b,0 2px 4px #0003;
+    }
+    .frost-pin.selected,.new-pin.selected{
+      --station-outline:2px solid #edb138;
+    }
+    .frost-pin.altered-station{
+      --station-size:24px;
+      --station-border-width:2px;
+      --station-border-style:solid;
+      --station-border-colour:#FFFFFF;
+    }
+    .frost-pin.inactive-sensors,.new-pin.inactive-sensors{
+      --station-border-colour:#a7a6a6;
+      --station-border-width:1px;
+      --station-shadow:none;
+      --station-outline:0 solid;
+    }
+    .frost-pin.inactive-sensors{background:transparent}
+  </style>
+</head>
+<body>
+<header>
+  <div id="load-status" class="load-status" role="status" aria-live="polite" aria-busy="true">
+    <span id="load-label">Laster kartet...</span>
+    <progress id="load-progress" aria-label="Fullførte forespørsler"></progress>
+  </div>
+  <span id="domain" hidden></span>
+  <div class="header-right">
+    <button id="reset-defaults" type="button" class="icon-button" title="Tilbakestill alt til standard" aria-label="Tilbakestill alt til standard" disabled><i data-lucide="rotate-ccw"></i></button>
+    <button id="save-map" type="button" disabled>Lagre kart</button>
+    <button id="save-scenario" type="button" disabled>Lagre scenario</button>
+    <button id="load-scenario" type="button" disabled>Åpne scenario</button>
+    <input id="scenario-file" type="file" accept=".json,application/json" hidden>
+    <input id="export" type="button" href="/api/export.gpkg" aria-disabled="true" value="Eksporter til ArcGIS">
+  </div>
+</header>
+<main>
+  <aside aria-label="Stasjonsscenario">
+    <section class="section">
+      <div class="selection-field"><label for="terrain-layer">Kartlag</label><select id="terrain-layer" disabled><option value="">Værkart</option></select></div>
+    </section>
+    <section class="section catalog-section">
+      <details id="phenomena-picker" class="catalog-details"><summary>Værfenomen</summary>
+      <div class="catalog-content">
+      <fieldset id="phenomena" class="field phenomena" disabled>
+        <label><input type="checkbox" data-phenomenon value="temperature">Temperatur</label>
+        <label><input type="checkbox" data-phenomenon value="wind">Vindhastighet</label>
+        <label><input type="checkbox" data-phenomenon value="precipitation">Nedbør</label>
+        <label><input type="checkbox" data-phenomenon value="snow">Snødybde</label>
+        <label><input type="checkbox" data-phenomenon value="humidity">Luftfuktighet</label>
+        <label><input type="checkbox" data-phenomenon value="road_temperature">Vegbanetemperatur</label>
+        <div id="layers-note" class="data-note" hidden></div>
+      </fieldset>
+      <div id="class-definition" class="data-note" hidden></div>
+      </div></details>
+    </section>
+    <section class="section catalog-section" aria-label="Dekningsgrad">
+      <details id="coverage-picker" class="catalog-details"><summary>Dekningsgrad</summary>
+        <div class="catalog-content">
+          <div id="coverage-classes" class="phenomena"></div>
+        </div>
+      </details>
+      <div class="catalog-tools"><label class="road-toggle"><input id="coverage-show" type="checkbox" disabled>Vis</label></div>
+      <div id="coverage-status" class="road-status" role="status"></div>
+    </section>
+    <section id="kuldehull-panel" class="section catalog-section" aria-label="Kuldehull">
+      <details id="kuldehull-picker" class="catalog-details"><summary>Kuldehull</summary>
+      <div class="catalog-content">
+      <div class="field"><label for="kuldehull-depth" title="Velger hele bassenger etter største terrengdybde">Dypere enn</label><div class="input-wrap"><input id="kuldehull-depth" type="number" min="0" max="10000" step="1" value="0" disabled><span>m</span></div></div>
+      <div class="field"><label class="road-toggle"><input id="kuldehull-only" type="checkbox" disabled>Bare usikkerhet i kuldehull</label></div>
+      </div></details>
+      <div class="catalog-tools"><label class="road-toggle"><input id="kuldehull-show" type="checkbox" disabled>Vis</label></div>
+      <div id="kuldehull-status" class="road-status" role="status"></div>
+    </section>
+    <section class="section" aria-label="Fylkesfilter">
+      <details id="county-picker" class="catalog-details"><summary>Fylker <span id="county-count" class="catalog-count">Alle valgt</span></summary>
+        <div class="road-actions"><button id="county-all" type="button">Alle</button><button id="county-none" type="button">Ingen</button></div>
+        <div id="county-options" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;max-height:260px;overflow:auto;margin-top:10px"></div>
+        <div id="county-error" role="status"></div>
+      </details>
+    </section>
+    <section id="road-panel" class="section catalog-section" aria-label="Vegnett og usikkerhet langs veg">
+      <details id="road-picker" class="road-filters catalog-details"><summary>Vegnett</summary>
+        <div class="catalog-content">
+        <fieldset><div id="road-categories" class="road-options">Laster vegnett</div></fieldset>
+        <fieldset><legend id="road-class-label">VS_Total-klasser</legend><div id="road-classes" class="road-options road-classes"></div></fieldset>
+        <div class="field"><label for="road-reference">Vegnavn</label><input id="road-reference" type="text" maxlength="30" placeholder="E6 eller Rv3"></div>
+        <div class="field"><label class="road-toggle"><input id="road-corridor" type="checkbox">Værkart langs valgte veger</label></div>
+        <div class="field"><label for="road-distance">Korridoravstand</label><div class="input-wrap"><input id="road-distance" type="number" min="0" max="5000" step="50" value="1000"><span>m</span></div></div>
+        </div>
+      </details>
+      <div class="catalog-tools"><label class="road-toggle"><input id="road-show" type="checkbox">Vis</label><button id="road-download" class="icon-button" title="Last ned viste vegenker som GeoJSON" aria-label="Last ned viste veglenker som GeoJSON" disabled><i data-lucide="download"></i></button></div>
+      <div id="road-status" class="road-status" role="status" hidden></div>
+      <ol id="road-ranking" class="road-ranking" aria-label="Viste veglenker med høyest modellert feil" hidden></ol>
+    </section>
+    <section class="section">
+      <details id="station-picker" class="catalog-details"><summary>Værstasjoner <span class="catalog-count" id="network-count">—</span></summary>
+      <div class="catalog-content">
+      <div class="field"><label for="network">Stasjonsnett</label><select id="network" disabled><option value="frost">Alle værstasjoner</option><option value="svv">Vegværstasjoner</option><option value="empty">Tomt nett</option></select></div>
+      <label class="road-toggle data-note"><input id="station-move-mode" type="checkbox" autocomplete="off">Flyttemodus</label>
+      <label class="road-toggle data-note"><input id="station-calculation-points" type="checkbox" checked>Vis beregningspunkter</label>
+      <div id="calculation-progress" class="data-note" role="status" hidden></div>
+      <div hidden>
+      <div class="field"><label for="station-since">Stasjonsdata siden</label><input id="station-since" type="date"></div>
+      <div id="station-date-preview" class="data-note" aria-live="polite" hidden>
+        <div id="station-date-counts"></div>
+        <button id="station-date-apply" type="button" disabled>Bekreft og beregn</button>
+        <button id="station-date-cancel" type="button">Avbryt</button>
+      </div>
+      <div id="precompute-status" class="precompute-status" aria-live="polite" hidden>
+        <div id="precompute-current"></div>
+        <details><summary id="precompute-summary">Lagrede grunnflater</summary><ul id="precompute-jobs"></ul></details>
+      </div>
+      </div>
+      </div></details>
+    </section>
+    <section class="section">
+      <div id="comparison-tabs" class="comparison-tabs" role="tablist" aria-label="Sammenligning">
+        <button id="comparison-baseline" role="tab" data-comparison="baseline" aria-selected="false" aria-controls="comparison-panel" tabindex="-1">Alle endringer</button>
+        <button id="comparison-selected" role="tab" data-comparison="selected" aria-selected="true" aria-controls="comparison-panel" tabindex="0">Valgt stasjon</button>
+      </div>
+      <div id="comparison-panel" role="tabpanel" aria-labelledby="comparison-selected">
+      <div class="selection-field"><label for="selected-station">Valgt stasjon</label><div class="station-control"><select id="selected-station" disabled><option value="">Velg en stasjon</option></select><button id="remove-frost" class="icon-button" title="Fjern valgt Frost-stasjon fra scenariet" aria-label="Fjern valgt Frost-stasjon fra scenariet" disabled><i data-lucide="trash-2"></i></button><button id="restore-frost" class="icon-button" title="Gjenopprett opprinnelig Frost-nett" aria-label="Gjenopprett opprinnelig Frost-nett" hidden disabled><i data-lucide="undo-2"></i></button></div></div>
+      <div id="frost-edit-status" class="data-note" hidden></div>
+      <div id="selected-description" class="data-note">Forskjell med og uten valgt stasjon</div>
+      </div>
+    </section>
+    <section class="section">
+      <div class="section-top"><h2>Egne forslag <span class="count" id="manual-count">0</span></h2><div class="tools"><button id="undo" class="icon-button" title="Angre siste stasjon" aria-label="Angre siste stasjon" disabled><i data-lucide="undo-2"></i></button><button id="reset" class="icon-button" title="Fjern alle egne forslag" aria-label="Fjern alle egne forslag" disabled><i data-lucide="rotate-ccw"></i></button></div></div>
+      <ol id="stations" class="station-list"></ol>
+      <div id="empty" class="empty">Ingen egne stasjonsforslag</div>
+    </section>
+    <section class="section"><div id="rmse-filter" class="field"><label for="rmse-min">Skjul farger under <output id="rmse-min-value" for="rmse-min" aria-label="Av - alle farger vises" title="Av - alle farger vises"></output></label><input id="rmse-min" type="range" min="0" max="0" step="any" value="0" disabled></div><div class="field"><label for="opacity">Kartlagets gjennomsiktighet</label><input id="opacity" type="range" min="0" max="100" step="5" value="15"></div></section>
+  </aside>
+  <section class="map-region" aria-label="Kart over norske værstasjoner">
+    <div class="loading-bar"></div>
+    <div id="map"></div>
+    <div class="map-toolbar">
+      <div class="modes" role="group" aria-label="Kartlag">
+        <button data-mode="uncertainty" aria-pressed="true">Usikkerhet</button>
+        <button data-mode="baseline" aria-pressed="false">Grunnett</button>
+        <button data-mode="reduction" aria-pressed="false">Reduksjon</button>
+      </div>
+      <div class="map-tools"><button id="station-visibility" class="icon-button" aria-pressed="true">Skjul stasjoner</button><button id="fit" class="icon-button" title="Vis hele Norge" aria-label="Vis hele Norge"><i data-lucide="scan"></i></button></div>
+    </div>
+    <div id="message" class="message" role="alert" hidden><span></span><button title="Lukk melding" aria-label="Lukk melding"><i data-lucide="x"></i></button></div>
+    <div class="legend">
+      <div class="legend-title" id="legend-title">Temperatur</div>
+      <div id="ramp" class="ramp"></div><div class="ticks"><span id="low">Mindre usikkert</span><span id="middle" hidden>0</span><span id="high">Mer usikkert</span></div>
+      <details id="climate-legend" hidden style="max-width:260px;font-size:11px;line-height:1.6"><summary style="cursor:pointer">Vis klimasoner</summary><div id="climate-legend-items" style="max-height:180px;overflow:auto"></div></details>
+    </div>
+  </section>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+<script src="/station_app.js"></script>
+</body>
+</html>

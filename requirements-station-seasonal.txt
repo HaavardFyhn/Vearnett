@@ -1,0 +1,2 @@
+-r requirements-station-senorge.txt
+torch==2.5.1

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Station lab | New seNorge Frost network RMSE</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif}
+header{padding:14px;display:flex;gap:20px;flex-wrap:wrap}
+main{display:grid;grid-template-columns:390px 1fr;height:calc(100dvh - 50px)}
+aside{padding:18px;overflow:auto}#map{height:100%;background:#eee}
+label{display:block;font-weight:600;margin:14px 0 5px}select,button{padding:8px;width:100%;font:inherit}
+.warning{background:#fff2cc;padding:12px;line-height:1.5}#error{color:#a00}
+.legend{background:white;padding:12px}.native-tile{image-rendering:pixelated}
+.leaflet-tile-pane{filter:grayscale(1)}a[aria-disabled=true]{pointer-events:none;color:#777}
+@media(max-width:800px){main{display:block;height:auto}aside{max-height:60vh}#map{height:65vh}}
+</style></head><body>
+<header><strong>New seNorge GPU · Frost network corrected RMSE · 1 km</strong>
+<a href="/national-uncertainty">Frost/MEPS joint model (different)</a>
+<a href="/model-evaluation">Held-out evaluations</a></header>
+<main><aside>
+<p id="warning" class="warning"></p>
+<label for="day">Historical seNorge date</label><select id="day" disabled></select>
+<label for="variable">Temperature variable</label><select id="variable">
+<option value="0">Daily mean (tg)</option><option value="1">Daily minimum (tn)</option></select>
+<button id="prepare" disabled>Calculate Norway from all Frost station locations</button>
+<p id="status" role="status"></p><p id="error" role="alert"></p>
+<p>All Frost catalogue stations are shown. Green: eligible archived seNorge reference.
+Grey: outside supported grid or missing archive value. Click a station to remove it.
+Temperatures are seNorge values at those locations, not actual Frost readings.</p>
+<label><input id="show-stations" type="checkbox" checked> Show all stations</label>
+<button id="restore">Restore all stations</button>
+<p id="selection" role="status">Full network</p>
+<label for="station">Removed station (or click it on the map)</label><select id="station" disabled>
+<option value="">Full network</option></select>
+<label for="mode">Network map</label><select id="mode">
+<option value="full">Full network corrected RMSE</option>
+<option value="change">RMSE increase after removal</option>
+<option value="without">Corrected RMSE without station</option></select>
+<p id="summary"></p><p id="removal"></p>
+<p>At each cell the original calculation selects the lowest predicted corrected RMSE.
+Removal switches to the next-best eligible station. No change is expected where the
+removed station was not the best source. Grey in the removal view marks cells that
+lose their only eligible reference; that is NoData, not zero uncertainty.</p>
+<button id="norway">Show Norway</button>
+<a id="export" aria-disabled="true">Download this network scenario (1 km GeoTIFF)</a>
+<h3>Exact cell sources</h3><div id="detail">Click land to inspect the winning and next-best stations.</div>
+</aside><div id="map"></div></main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/senorge_network_map.js"></script>
+</body></html>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Station lab | New seNorge GPU transfer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif}
+header{padding:14px;display:flex;gap:20px;flex-wrap:wrap}
+main{display:grid;grid-template-columns:390px 1fr;height:calc(100dvh - 50px)}
+aside{padding:18px;overflow:auto}#map{height:100%;background:#eee}
+label{display:block;font-weight:600;margin:14px 0 5px}
+select,button,input[type=number]{padding:8px;width:100%;font:inherit}
+.warning{background:#fff2cc;padding:12px;line-height:1.5}#error{color:#a00}
+.legend{background:white;padding:12px}.native-tile{image-rendering:pixelated}
+.leaflet-tile-pane{filter:grayscale(1)}
+a[aria-disabled=true]{pointer-events:none;color:#777}
+@media(max-width:800px){main{display:block;height:auto}aside{max-height:60vh}#map{height:65vh}}
+</style></head><body>
+<header><strong>New seNorge GPU transfer · native 1 km</strong>
+<a href="/senorge-network">New seNorge Frost network + station removal</a>
+<a href="/national-uncertainty">Frost/MEPS joint map (different model)</a>
+<a href="/model-evaluation">Held-out model evaluations</a></header>
+<main><aside>
+<p id="warning" class="warning">Loading and checking the new seNorge models and historical archive...</p>
+<label for="day">Historical seNorge date (cached training date plan)</label><select id="day" disabled></select>
+<label for="variable">Temperature variable</label><select id="variable" disabled>
+<option value="0">Daily mean (tg)</option><option value="1">Daily minimum (tn)</option></select>
+<label><input id="place" type="checkbox" checked> Click map to place/move virtual reference</label>
+<p>Any supported land grid cell can be the reference. No existing station is required.
+Uncheck placement to inspect the predicted cells without moving the reference.</p>
+<p id="reference" role="status">Choose a date, then click land.</p>
+<label><input id="manual" type="checkbox"> Override the archived reference temperature</label>
+<label for="temperature">Reference temperature (°C)</label>
+<input id="temperature" type="number" step="0.1" disabled>
+<button id="predict" disabled>Recompute from this virtual reference</button>
+<p id="status" role="status"></p><p id="error" role="alert"></p>
+<label for="metric">Map colours</label><select id="metric">
+<option value="rmse_c">Predicted corrected RMSE (°C), NOT interval radius</option>
+<option value="temperature_c">Predicted target temperature (°C)</option></select>
+<p id="summary"></p>
+<button id="norway">Show Norway</button>
+<p>Native 1 km predictions within 46 km of the virtual reference; sea and unsupported
+cells are transparent. Zoom is under your control, with no automatic zoom on click.
+The known reference cell has temperature identity and transfer error zero.</p>
+<a id="export" aria-disabled="true">Download temperature + corrected RMSE (1 km GeoTIFF)</a>
+<h3>Exact cell details</h3><div id="detail">Uncheck placement, then click a predicted cell.</div>
+</aside><div id="map"></div></main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/senorge_transfer_map.js"></script>
+</body></html>

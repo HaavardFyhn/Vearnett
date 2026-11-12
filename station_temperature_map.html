@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Værnett | Eksperimentelt temperaturkart</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    *{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;color:#222}
+    header{padding:14px;border-bottom:1px solid #ccc;display:flex;gap:18px;flex-wrap:wrap}
+    main{display:grid;grid-template-columns:360px 1fr;height:calc(100dvh - 50px)}
+    aside{padding:18px;overflow:auto}label{display:block;margin:15px 0 6px;font-weight:600}
+    select,input,button{width:100%;font:inherit;padding:8px}input[type=checkbox]{width:auto}
+    .warning{background:#fff2cc;padding:12px;line-height:1.5}
+    #error{color:#a00;white-space:pre-line}#map{height:100%;background:#eee}
+    .leaflet-tile-pane{filter:grayscale(100%)}
+    .legend{background:white;padding:12px;line-height:1.6}
+    .ramp{height:12px;background:linear-gradient(to right,#053061,#4393c3,#f7f7f7,#d6604d,#67001f)}
+    #export[aria-disabled=true]{pointer-events:none;color:#777}
+    @media(max-width:750px){main{grid-template-columns:1fr;height:auto}aside{max-height:55vh}#map{height:65vh}}
+  </style>
+</head>
+<body>
+  <header><strong>Eksperimentelt temperaturkart &middot; 1 km</strong>
+    <a href="/valley-sandbox">Stasjonsdomino</a><a href="/footprint">Footprint</a>
+    <a href="/model-evaluation">Evaluering: felles stasjoner og seNorge GPU</a>
+    <a href="/national-uncertainty">Nasjonalt predikert usikkerhetskart</a></header>
+  <main><aside>
+    <p class="warning" id="warning">Laster modell og begrensninger ...</p>
+    <label for="source">Kildestasjon (alle terrengst&oslash;ttede stasjoner)</label><select id="source" disabled></select>
+    <label><input type="checkbox" id="show-stations" checked> Vis alle stasjoner (klikk for &aring; velge)</label>
+    <button id="national" disabled>Vis hele stasjonsnettet</button>
+    <label for="day">Arkivert vinterdato</label><select id="day" disabled></select>
+    <label for="hour">UTC-time</label><select id="hour" disabled>
+      <option value="0">00 UTC</option><option value="3" selected>03 UTC</option><option value="6">06 UTC</option>
+    </select>
+    <label><input type="checkbox" id="synthetic" disabled> Bruk syntetisk kildetemperatur</label>
+    <label for="temperature">Antatt temperatur: <output id="temperature-value">0</output> &deg;C</label>
+    <input id="temperature" type="range" min="-20" max="20" step="0.5" value="0" disabled>
+    <p id="observation">Standard: kvalitetssikret observasjon fra kildestasjonen.</p>
+    <label><input type="checkbox" id="uncertainty" disabled> Vis eksperimentelle intervaller</label>
+    <label for="display">Kartfarger</label><select id="display">
+      <option value="temperature_c">Temperatur</option>
+      <option value="interval_radius_c">Eksperimentell radius (&plusmn; &deg;C)</option>
+    </select>
+    <p class="warning" id="uncertainty-status"></p>
+    <p id="source-warning"></p>
+    <button id="prepare" disabled>Last og vis 64 &times; 64 km</button>
+    <p>Direkte overf&oslash;ring fra &eacute;n stasjon til hver st&oslash;ttet landcelle.
+      Ingen interpolasjon mellom stasjoner eller domino. Intervallene er ikke kalibrert for kartceller.
+      MEPS-bakgrunnen har 2,5 km oppl&oslash;sning; 1 km gjelder kartcellene og terrengbeskrivelsen.</p>
+    <p id="status" role="status"></p><p id="error" role="alert"></p>
+    <p id="summary"></p><p id="weather"></p>
+    <a id="export" aria-disabled="true">Last ned temperaturkart (GeoTIFF, UTM 33N)</a>
+  </aside><div id="map"></div></main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/station_temperature_map.js"></script>
+</body>
+</html>

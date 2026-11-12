@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Værnett | Syntetisk temperaturpilot</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    *{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;color:#222}
+    header{padding:14px;border-bottom:1px solid #ccc;display:flex;justify-content:space-between}
+    main{display:grid;grid-template-columns:360px 1fr;height:calc(100dvh - 50px)}
+    aside{padding:18px;overflow:auto}label{display:block;margin:15px 0 6px;font-weight:600}
+    select,input{width:100%;font:inherit;padding:8px}.warning{background:#fff2cc;padding:12px;line-height:1.5}
+    #error{color:#a00;white-space:pre-line}#map{height:100%;background:#eee}.leaflet-tile-pane{filter:grayscale(100%)}
+    table{width:100%;font-size:12px;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid #ddd;text-align:left}
+    .legend{position:absolute;bottom:25px;left:375px;background:white;padding:12px;z-index:500}
+    .ramp{height:12px;background:linear-gradient(to right,#053061,#4393c3,#f7f7f7,#d6604d,#67001f)}
+    @media(max-width:750px){main{grid-template-columns:1fr;height:auto}aside{max-height:55vh}#map{height:65vh}.legend{left:auto;right:12px}}
+  </style>
+</head>
+<body>
+  <header><strong>Syntetisk temperaturpilot</strong><a href="/temperature-map">Temperaturkart 1 km</a><a href="/valley-pilot">Observerte testresultater</a></header>
+  <main><aside>
+    <p class="warning" id="warning">Laster modell og begrensninger ...</p>
+    <label for="source">Startstasjon</label><select id="source" disabled></select>
+    <label for="temperature">Antatt temperatur: <output id="temperature-value">0</output> &deg;C</label>
+    <input id="temperature" type="range" min="-20" max="20" step="0.5" value="0" disabled>
+    <label for="time">Arkivert v&aelig;r, UTC</label><select id="time" disabled></select>
+    <label for="hops">Maksimalt antall overf&oslash;ringer</label><select id="hops" disabled>
+      <option value="1">1: direkte</option><option value="2">2 hopp</option><option value="3">3 hopp</option>
+    </select>
+    <p>Rotfestet tre: hver stasjon beregnes bare &eacute;n gang. Ingen tilbakekobling.
+      Prediksjoner blir syntetiske kilder i neste hopp. Kartet interpolerer ikke mellom stasjoner.</p>
+    <p id="status" role="status"></p><p id="error" role="alert"></p>
+    <table><thead><tr><th>Stasjon</th><th>Fra</th><th>Hopp</th><th>&deg;C</th></tr></thead><tbody id="nodes"></tbody></table>
+    <p id="unreachable"></p>
+  </aside><div id="map"></div></main>
+  <div class="legend">Syntetisk temperatur &deg;C<div class="ramp"></div><span>-20 &nbsp;&nbsp;&nbsp;&nbsp; 0 &nbsp;&nbsp;&nbsp;&nbsp; +20</span><br>Farger mettes utenfor skalaen</div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/station_valley_sandbox.js"></script>
+</body>
+</html>
