@@ -33,11 +33,20 @@ WEATHER = {
 }
 
 # The one model per phenomenon offered in Station Lab.
+DIRECT_P95 = "temperature:direct_p95"
+
+
+def direct_p95_config(prefix):
+    return dict(id=DIRECT_P95, phenomenon="temperature", kind="direct_p95",
+                label="Temperatur", metric="P95", unit="°C", prefix=str(prefix),
+                element=WEATHER["temperature"][1], model_grid_m=1000)
+
+
 PHENOMENON_DATASETS = {
-    "temperature": "temperature:senorge30",
+    "temperature": DIRECT_P95,
     "wind": "wind:continuous",
-    "precipitation": "precipitation:class",
     "snow": "snow:class",
+    "precipitation": "precipitation:class",
     "humidity": "humidity:continuous",
     "road_temperature": "road_temperature:continuous",
 }
@@ -289,6 +298,14 @@ def restricted_profile(profile, target_cache, excluded, build=False):
                 frost_maximum=max(float(upper), minimum * 1.01))
 
 
+def station_metadata(profile):
+    return dict(id=profile["id"], phenomenon=profile["phenomenon"], kind=profile["kind"],
+                stations=profile["stations"], source_grid_m=profile.get("source_grid_m"),
+                has_baseline=profile.get("baseline") is not None,
+                ready=profile.get("baseline") is not None and
+                      profile.get("status", {}).get("state", "ready") == "ready")
+
+
 class WeatherRegistry:
     def __init__(self, root, grid, target_cache, categories, neighbors=0, models=None,
                  cell_m=1000, allow_precompute=False):
@@ -298,6 +315,8 @@ class WeatherRegistry:
         self.categories, self.neighbors = categories, neighbors
         self.loaded = {}
         self.svv_loaded = {}
+        self.station_profiles = {}
+        self.station_pending = {}
         self.models = {} if models is None else models
         self.allow_precompute = allow_precompute
         self.cell_m = cell_m
@@ -362,6 +381,11 @@ class WeatherRegistry:
                 prefix=str(portable), element=WEATHER["temperature"][1], model_grid_m=1000,
                 station_features=str(station_features),
             ))
+        direct = self.root / "outputs" / "senorge_results_10m"
+        if station_features.is_file() and all((direct / name).is_file() for name in (
+                "manifest.json", "grid_features.csv.gz", "results/direct-p95/xgboost_with_basins.ubj",
+                "results/direct-p95/xgboost_with_basins.json")):
+            self.available.append(dict(direct_p95_config(direct), station_features=str(station_features)))
         seasonal = self.root / "outputs" / "senorge_seasonal_station_model"
         if station_features.is_file() and all((seasonal / name).is_file() for name in
                 ("metadata.json", "combined.pt", "combined_normalization.npz", "seasonal_manifest.json")):
@@ -384,17 +408,61 @@ class WeatherRegistry:
                     metric="RMSE", unit="°C", prefix=str(gpu), model_grid_m=1000,
                     long_term=True, variable=variable))
 
+    def station_dataset_ids(self):
+        if self.portable_manifest is not None:
+            return set(self.portable_manifest.get("station_profiles", {})) | set(self.portable_manifest["profiles"])
+        return {item["id"] for item in self.available}
+
+    def station_metadata(self, identifier, restricted=False):
+        key = (identifier, bool(restricted))
+        with self.lock:
+            if key in self.station_profiles:
+                if self.portable_manifest is not None:
+                    return self.station_profiles[key]
+                if identifier in self.loaded:
+                    result = station_metadata(self.profile(identifier))
+                    self.station_profiles[key] = result
+                    return result
+                pending = self.station_pending.get(identifier)
+                if pending is None or not pending.is_file():
+                    return self.station_profiles[key]
+                self.station_profiles.pop((identifier, False), None)
+                self.station_profiles.pop((identifier, True), None)
+                self.station_pending.pop(identifier, None)
+            if self.portable_manifest is not None:
+                entries = self.portable_manifest.get("station_profiles", {}).get(identifier)
+                is_metadata = entries is not None
+                if entries is None:
+                    entries = self.portable_manifest["profiles"][identifier]
+                base = self.station_profiles.get((identifier, False))
+                if base is None:
+                    base = joblib.load(self.root / entries["profile"])
+                    base = base if is_metadata else station_metadata(base)
+                    self.station_profiles[(identifier, False)] = base
+                if restricted and base["has_baseline"]:
+                    reference = joblib.load(self.root / entries["svv"])
+                    result = reference if is_metadata else station_metadata(reference)
+                else:
+                    result = base
+            else:
+                profile = self.loaded.get(identifier)
+                if profile is not None:
+                    result = station_metadata(profile)
+                else:
+                    config = next((item for item in self.available if item["id"] == identifier), None)
+                    if config is None:
+                        raise ValueError(f"Stasjonsmetadata mangler for {identifier}")
+                    result = self._load(config, stations_only=True)
+                    pending = result.pop("_pending_cache", None)
+                    if pending is not None:
+                        self.station_pending[identifier] = pending
+            self.station_profiles[key] = result
+            return result
+
     def svv_profile(self, identifier, build=False):
         """Unedited national SVV baseline, independent of the interactive scenario."""
         if self.portable_manifest is not None:
-            profile = self.profile(identifier)
-            if identifier not in self.svv_loaded:
-                entry = self.portable_manifest["profiles"][identifier]
-                reference = joblib.load(self.root / entry["svv"])
-                reference["model"] = profile["model"]
-                reference["cache_path"] = self.root / entry["svv"]
-                self.svv_loaded[identifier] = reference
-            return self.svv_loaded[identifier]
+            return self.portable_reference(identifier, "svv")
         from station_pross import pross_excluded
 
         with self.lock:
@@ -417,6 +485,16 @@ class WeatherRegistry:
                 self.svv_loaded[key] = reference
             return self.svv_loaded[key]
 
+    def portable_reference(self, identifier, network):
+        key = (identifier, network)
+        with self.lock:
+            if key not in self.svv_loaded:
+                path = self.root / self.portable_manifest["profiles"][identifier][network]
+                reference = joblib.load(path)
+                reference.update(model=self.profile(identifier)["model"], cache_path=path)
+                self.svv_loaded[key] = reference
+            return self.svv_loaded[key]
+
     def profile(self, identifier):
         if identifier == "temperature:senorge30_pross":
             identifier = "temperature:senorge30"
@@ -435,7 +513,7 @@ class WeatherRegistry:
                 self.loaded[identifier] = self._load(config)
             return self.loaded[identifier]
 
-    def _load(self, config):
+    def _load(self, config, stations_only=False):
         if self.portable_manifest is not None:
             entry = self.portable_manifest["profiles"][config["id"]]
             profile = joblib.load(self.root / entry["profile"])
@@ -449,25 +527,33 @@ class WeatherRegistry:
             return profile
         if config["kind"].startswith("senorge_gpu_"):
             from station_senorge_gpu import load_profile
-            return load_profile(self, config)
+            profile = load_profile(self, config)
+            return station_metadata(profile) if stations_only else profile
         prefix = Path(config["prefix"])
+        direct = config["id"] == DIRECT_P95
         seasonal = config["kind"].startswith("seasonal_")
-        portable = config["kind"] in ("senorge30", "senorge30_pross") or seasonal
+        portable = config["kind"] in ("senorge30", "senorge30_pross") or seasonal or direct
         model_path = prefix / ("combined.pt" if seasonal else "xgboost_with_basins.ubj") if portable else prefix.with_name(prefix.name + "_model.joblib")
+        if direct:
+            model_path = prefix / "results" / "direct-p95" / model_path.name
         feature_path = Path(config["station_features"]) if portable else prefix.with_name(prefix.name + "_station_features.gpkg")
         metadata_path = prefix / "metadata.json" if portable else prefix.with_name(prefix.name + "_metadata.json")
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata = json.loads((prefix / "manifest.json" if direct else metadata_path).read_text(encoding="utf-8"))
         expected_features = FEATURES
         if portable:
             from station_senorge import PAIR_FEATURES, BasinLookup, SeNorgePairModel
             from file_hash import sha256
             expected_features = PAIR_FEATURES
-            if sha256(model_path) != metadata["model_sha256"]:
+            model_hash = (json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
+                          ["file_sha256"][model_path.name] if direct else metadata["model_sha256"])
+            if sha256(model_path) != model_hash:
                 raise ValueError("seNorge-modellens kontrollsum stemmer ikke")
             basin_prefix = self.root / "outputs" / "senorge_30yr_station_model" if seasonal else prefix
-            basin_metadata = json.loads((basin_prefix / "metadata.json").read_text(encoding="utf-8"))
-            if sha256(basin_prefix / "grid_features.csv.gz") != basin_metadata["basin_grid_sha256"]:
-                raise ValueError("seNorge-bassengtabellens kontrollsum stemmer ikke")
+            basin_hash = sha256(basin_prefix / "grid_features.csv.gz")
+            if not direct:
+                basin_metadata = json.loads((basin_prefix / "metadata.json").read_text(encoding="utf-8"))
+                if basin_hash != basin_metadata["basin_grid_sha256"]:
+                    raise ValueError("seNorge-bassengtabellens kontrollsum stemmer ikke")
         if metadata["features"] != expected_features:
             raise ValueError("Værmodellens variabler samsvarer ikke med beregningsmotoren")
         features = pyogrio.read_dataframe(feature_path).drop_duplicates("station_id")
@@ -521,6 +607,8 @@ class WeatherRegistry:
                                              station_grid=station_grid_signature,
                                              metadata=metadata,
                                              basins=(basin_path.stat().st_size, basin_path.stat().st_mtime_ns))
+                if direct:
+                    signature["portable"]["basin_features"] = basin_hash
             if self.cell_m == 500:
                 from file_hash import sha256
                 signature["model"] = sha256(model_path)
@@ -560,6 +648,21 @@ class WeatherRegistry:
             raise ValueError("En observasjonsstasjon har en terrengkategori som mangler i rutenettet")
         if sources.empty:
             raise ValueError("Ingen Frost-stasjoner har brukbare observasjoner og terrengverdier for dette værvalget")
+        if stations_only:
+            ready = False
+            if path.exists():
+                with np.load(path, allow_pickle=False) as stored:
+                    baseline, second, winner = (stored[key].copy() for key in ("baseline", "second", "winner"))
+                    completed = int(stored["completed"])
+                if (baseline.shape != (len(self.grid),) or second.shape != baseline.shape or winner.shape != baseline.shape or
+                        completed != len(sources) or not np.isfinite(baseline).all() or
+                        (len(sources) > 1 and not np.isfinite(second).all()) or (second < baseline).any() or
+                        (winner < 0).any() or (winner >= len(sources)).any()):
+                    raise ValueError("Ugyldig mellomlagret Frost-flate. Fjern den aktuelle mellomlagerfilen og start på nytt")
+                ready = True
+            return dict(id=config["id"], phenomenon=config["phenomenon"], kind=config["kind"],
+                        stations=sources, source_grid_m=source_grid_m, has_baseline=ready, ready=ready,
+                        _pending_cache=None if ready else path)
         model_key = str(model_path) + (":" + config["seasonal_target"] if seasonal else "")
         if model_key not in self.models:
             if seasonal:
@@ -584,7 +687,7 @@ class WeatherRegistry:
         if int(model.n_features_in_) != len(expected_features):
             raise ValueError("Den lagrede modellen støtter ikke de forventede terrengvariablene")
         maximum = 1.0 if config["kind"] == "class" else {
-            "temperature": 6.5, "wind": 20, "precipitation": 25, "snow": 50, "humidity": 25,
+            "temperature": 6.5 if not direct else 25, "wind": 20, "precipitation": 25, "snow": 50, "humidity": 25,
             "road_temperature": 8,
         }[config["phenomenon"]]
         profile = dict(**config, model=model, baseline=None, second=None, winner=None, stations=sources,

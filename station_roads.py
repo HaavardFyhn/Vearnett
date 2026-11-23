@@ -34,6 +34,9 @@ SCORE_COMPONENTS = [
     ("VS_Vaerutsatt", "Værutsatt", "#56b4e9"),
 ]
 ROAD_LAYER = "Vegnett_VegScore_full"
+SCORE_ROAD_FIELDS = ["linkid", "vegnokkel", "roadcategory", "kommunenavn",
+                     "istunnel", "isferry", "VS_Total", "VS_Total_klasse", "fylkesnr",
+                     *(field for field, _, _ in SCORE_COMPONENTS)]
 
 
 def road_references(value):
@@ -77,7 +80,7 @@ def save_road_arrays(path, **arrays):
 
 def indexed_road_source(source, cache_dir, layer=ROAD_LAYER):
     """Keep the existing indexed SQLite reader behind a compact GDB layer cache."""
-    signature = dict(schema="gdb-road-source-v1", source=str(source.resolve()), layer=layer,
+    signature = dict(schema="gdb-road-source-no-municipal-v2", source=str(source.resolve()), layer=layer,
                      files=[(path.name, path.stat().st_size, path.stat().st_mtime_ns)
                             for path in sorted(source.iterdir())
                             if path.is_file() and not path.name.lower().endswith(".lock")])
@@ -87,12 +90,11 @@ def indexed_road_source(source, cache_dir, layer=ROAD_LAYER):
     if target.is_file():
         return target
     info = pyogrio.read_info(source, layer=layer)
-    required = ["linkid", "vegnokkel", "roadcategory", "kommunenavn",
-                "istunnel", "isferry", "VS_Total", "VS_Total_klasse", "fylkesnr"]
+    required = SCORE_ROAD_FIELDS[:9]
     missing = set(required) - set(info["fields"])
     if missing:
         raise ValueError(f"{layer} mangler felter: {sorted(missing)}")
-    fields = required + [field for field, _, _ in SCORE_COMPONENTS if field in info["fields"]]
+    fields = [field for field in SCORE_ROAD_FIELDS if field in info["fields"]]
     if CRS(info["crs"]).to_epsg() != 25833:
         raise ValueError("Vegnettet må være i EPSG:25833")
     with tempfile.NamedTemporaryFile(dir=cache_dir, suffix=".gpkg", delete=False) as handle:
@@ -102,16 +104,72 @@ def indexed_road_source(source, cache_dir, layer=ROAD_LAYER):
         count = int(info["features"])
         if count <= 0:
             raise ValueError(f"{layer} er tomt")
+        written = 0
         for offset in range(0, count, 50000):
+            batch_size = min(50000, count-offset)
             frame = pyogrio.read_dataframe(source, layer=layer, columns=fields,
-                                           skip_features=offset, max_features=min(50000, count-offset),
+                                           skip_features=offset, max_features=batch_size,
                                            force_2d=True)
-            if len(frame) != min(50000, count-offset):
+            if len(frame) != batch_size:
                 raise ValueError(f"{layer} ble endret under innlesing")
-            pyogrio.write_dataframe(frame, staged, layer=layer, driver="GPKG", append=offset > 0)
-            print(f"Vegnett fra {source.name}, lag {layer}: {offset+len(frame)}/{count}", flush=True)
-        if int(pyogrio.read_info(staged, layer=layer)["features"]) != count:
+            frame = without_municipal_roads(frame)
+            if not frame.empty:
+                pyogrio.write_dataframe(frame, staged, layer=layer, driver="GPKG", append=written > 0)
+                written += len(frame)
+            print(f"Vegnett fra {source.name}, lag {layer}: {offset+batch_size}/{count}", flush=True)
+        if not written:
+            raise ValueError(f"{layer} inneholder ingen veger utenom kommunale veger")
+        if int(pyogrio.read_info(staged, layer=layer)["features"]) != written:
             raise ValueError("Ufullstendig vegnettmellomlager")
+        staged.replace(target)
+    finally:
+        staged.unlink(missing_ok=True)
+    return target
+
+
+def without_municipal_roads(frame):
+    categories = frame["roadcategory"].fillna("").astype(str).str.strip().str.lower().str.replace(" ", "", regex=False)
+    return frame.loc[~categories.isin(["k", "kommunalveg"])]
+
+
+def filtered_road_source(source, cache_dir, info):
+    layer = info["layer_name"]
+    fields = [field for field in SCORE_ROAD_FIELDS if field in info["fields"]]
+    extra_fields = set(info["fields"]) - set(fields)
+    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        found = connection.execute(
+            f"SELECT 1 FROM {identifier(layer)} "
+            "WHERE LOWER(REPLACE(TRIM(roadcategory), ' ', '')) IN ('k', 'kommunalveg') LIMIT 1").fetchone()
+    if found is None and not extra_fields:
+        return source
+    stat = source.stat()
+    signature = ["compact-roads-v1" if extra_fields else "exclude-municipal-v1",
+                 str(source.resolve()), stat.st_size, stat.st_mtime_ns, layer]
+    key = hashlib.sha256(json.dumps(signature).encode()).hexdigest()[:20]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"roads_without_municipal_{key}.gpkg"
+    if target.is_file():
+        return target
+    with tempfile.NamedTemporaryFile(dir=cache_dir, suffix=".gpkg", delete=False) as handle:
+        staged = Path(handle.name)
+    staged.unlink()
+    try:
+        count, written = int(info["features"]), 0
+        for offset in range(0, count, 50000):
+            batch_size = min(50000, count-offset)
+            frame = pyogrio.read_dataframe(source, layer=layer, columns=fields, skip_features=offset,
+                                           max_features=batch_size, force_2d=True)
+            if len(frame) != batch_size:
+                raise ValueError(f"{layer} ble endret under innlesing")
+            frame = without_municipal_roads(frame)
+            if not frame.empty:
+                pyogrio.write_dataframe(frame, staged, layer=layer, driver="GPKG", append=written > 0)
+                written += len(frame)
+            print(f"Klargjør vegnett: {offset+batch_size}/{count}", flush=True)
+        if not written:
+            raise ValueError(f"{layer} inneholder ingen veger utenom kommunale veger")
+        if int(pyogrio.read_info(staged, layer=layer)["features"]) != written:
+            raise ValueError("Ufullstendig filtrert vegnett")
         staged.replace(target)
     finally:
         staged.unlink(missing_ok=True)
@@ -128,6 +186,7 @@ class RoadNetwork:
         self.overviews = OrderedDict()
         self.overview_samples = OrderedDict()
         self.grid_links = {}
+        self.nearest_distances = {}
         self.display_data = None
         self.county_display_data = OrderedDict()
         self.display_samples = {}
@@ -140,6 +199,9 @@ class RoadNetwork:
         if self.path.suffix.lower() == ".gdb":
             self.path = indexed_road_source(self.source_path, self.cache_dir)
         info = pyogrio.read_info(self.path)
+        if "VS_Total" in info["fields"] and "roadcategory" in info["fields"]:
+            self.path = filtered_road_source(self.path, self.cache_dir, info)
+            info = pyogrio.read_info(self.path)
         self.score_network = "VS_Total" in info["fields"]
         self.score_fields = [field for field, _, _ in SCORE_COMPONENTS if field in info["fields"]]
         self.has_counties = "fylkesnr" in info["fields"]
@@ -531,6 +593,92 @@ class RoadNetwork:
             staged.unlink(missing_ok=True)
         return path
 
+    def load_nearest_distances(self, engine, distance):
+        key = self.grid_link_key(engine)
+        paths = []
+        for path in self.cache_dir.glob(f"road_nearest_{key}_*.npz"):
+            try:
+                maximum = float(path.stem.rsplit("_", 1)[1])
+            except ValueError:
+                continue
+            if maximum >= distance:
+                paths.append((maximum, path))
+        for maximum, path in sorted(paths):
+            with self.lock:
+                if path in self.nearest_distances:
+                    return self.nearest_distances[path]
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    values = stored["distance"].copy()
+                    if str(stored["key"]) != key or float(stored["maximum"]) != maximum:
+                        continue
+                if (values.dtype != np.float64 or values.shape != (len(engine.grid),) or
+                        np.isnan(values).any() or (values < 0).any() or
+                        (np.isfinite(values) & (values > maximum)).any()):
+                    continue
+            except (OSError, ValueError, KeyError, EOFError, BadZipFile):
+                continue
+            result = dict(path=path, maximum=maximum, distance=values)
+            with self.lock:
+                self.nearest_distances[path] = result
+            return result
+        return None
+
+    def prepare_nearest_distances(self, engine, maximum=2000, progress=None):
+        maximum = float(maximum)
+        if not np.isfinite(maximum) or not 0 < maximum <= 5000:
+            raise ValueError("Maksimal vegavstand må være større enn 0 og høyst 5000 meter")
+        saved = self.load_nearest_distances(engine, maximum)
+        if saved is not None:
+            return saved["path"]
+        roads = pyogrio.read_dataframe(self.path, layer=self.table, columns=[])
+        roads = roads.loc[roads.geometry.notna() & ~roads.geometry.is_empty &
+                          roads.geometry.geom_type.isin(["LineString", "MultiLineString"])]
+        if roads.empty:
+            raise ValueError("Vegnettet inneholder ingen linjegeometrier")
+        tree = shapely.STRtree(shapely.force_2d(roads.geometry.to_numpy()))
+        coordinates = engine.grid[["x", "y"]].to_numpy(dtype=np.float64)
+        half = engine.cell_m / 2
+        distances = np.full(len(coordinates), np.inf, dtype=np.float64)
+        for start in range(0, len(coordinates), 2048):
+            points = coordinates[start:start+2048]
+            squares = shapely.box(points[:, 0]-half, points[:, 1]-half, points[:, 0]+half, points[:, 1]+half)
+            hits, values = tree.query_nearest(squares, max_distance=maximum,
+                                              return_distance=True, all_matches=False)
+            valid = values <= maximum
+            distances[start + hits[0][valid]] = values[valid]
+            if progress is not None:
+                progress(min(start+2048, len(coordinates)), len(coordinates))
+        key = self.grid_link_key(engine)
+        path = self.cache_dir / f"road_nearest_{key}_{maximum:g}.npz"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        save_road_arrays(path, distance=distances, key=np.asarray(key), maximum=np.asarray(maximum))
+        return path
+
+    def nearest_corridor_mask(self, engine, bounds, data, distance, distances):
+        mask = np.zeros(len(engine.grid), dtype=bool)
+        footprint = self.viewport_footprint(bounds)
+        xmin, ymin, xmax, ymax = footprint.bounds
+        half = engine.cell_m / 2
+        x, y = engine.grid["x"].to_numpy(), engine.grid["y"].to_numpy()
+        padding = 2 * distance + half
+        candidates = np.flatnonzero((distances <= distance) &
+            (x >= xmin-padding) & (x <= xmax+padding) &
+            (y >= ymin-padding) & (y <= ymax+padding))
+        if not len(candidates):
+            return mask
+        squares = shapely.box(x[candidates]-half, y[candidates]-half,
+                              x[candidates]+half, y[candidates]+half)
+        clipped = footprint.buffer(distance) if distance else footprint
+        shapely.prepare(clipped)
+        safe = shapely.covers(clipped, squares) & (shapely.distance(squares, clipped.boundary) > distance)
+        mask[candidates[safe]] = True
+        boundary = candidates[~safe]
+        if len(boundary):
+            roads, _ = self.read(bounds, data, padding=distance)
+            mask |= self.spatial_mask(engine, roads, distance, candidates=boundary)
+        return mask
+
     def corridor_mask(self, engine, bounds, data, distance):
         distance = float(distance)
         if not np.isfinite(distance) or not 0 <= distance <= 5000:
@@ -543,8 +691,14 @@ class RoadNetwork:
                 self.masks.move_to_end(key)
                 return self.masks[key]
         mask = np.zeros(len(engine.grid), dtype=bool)
-        links = self.load_grid_links(engine, distance) if data.get("_county_geometry") is None else None
-        if links is not None:
+        all_roads = (self.limit is None and data.get("_county_geometry") is None and
+                     set(categories) == set(self.category_bits) and
+                     set(classes) == set(self.metadata["classes"]) and reference is None)
+        nearest = self.load_nearest_distances(engine, distance) if all_roads else None
+        links = self.load_grid_links(engine, distance) if nearest is None and data.get("_county_geometry") is None else None
+        if nearest is not None:
+            mask = self.nearest_corridor_mask(engine, bounds, data, distance, nearest["distance"])
+        elif links is not None:
             rows = self.matching_rows(bounds, data, padding=distance)[:self.limit]
             if len(rows):
                 footprint = self.viewport_footprint(bounds, distance)
@@ -567,19 +721,57 @@ class RoadNetwork:
                 self.masks.popitem(last=False)
         return mask
 
-    def spatial_mask(self, engine, roads, distance):
+    def national_corridor_mask(self, engine, distance):
+        distance = float(distance)
+        if not np.isfinite(distance) or not 0 <= distance <= 5000:
+            raise ValueError("Vegkorridoren må være mellom 0 og 5000 meter")
+        if not self.metadata["available"]:
+            raise ValueError("Vegnett mangler for kalibrering av fargeskala")
+        key = self.grid_link_key(engine)
+        path = self.cache_dir / f"national_road_mask_{key}_{distance:g}.npz"
+        if path.is_file():
+            with np.load(path, allow_pickle=False) as stored:
+                mask = stored["mask"].copy()
+            if mask.dtype != np.bool_ or mask.shape != (len(engine.grid),):
+                raise ValueError(f"Ugyldig lagret nasjonal vegmaske: {path}")
+            return mask
+        nearest = self.load_nearest_distances(engine, distance)
+        if nearest is not None:
+            return nearest["distance"] <= distance
+        links = self.load_grid_links(engine, distance)
+        mask = np.zeros(len(engine.grid), dtype=bool)
+        if links is not None:
+            mask[links["cell"][links["distance"] <= distance]] = True
+        else:
+            roads = pyogrio.read_dataframe(self.path, layer=self.table, columns=[])
+            roads = roads.loc[roads.geometry.notna() & ~roads.geometry.is_empty &
+                              roads.geometry.geom_type.isin(["LineString", "MultiLineString"])]
+            mask = self.spatial_mask(engine, roads, distance)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        save_road_arrays(path, mask=mask)
+        return mask
+
+    def spatial_mask(self, engine, roads, distance, candidates=None):
         mask = np.zeros(len(engine.grid), dtype=bool)
         if roads.empty:
             return mask
         xmin, ymin, xmax, ymax = roads.total_bounds
         half = engine.cell_m / 2
         xs, ys = engine.grid["x"].to_numpy(), engine.grid["y"].to_numpy()
-        candidates = np.flatnonzero((xs >= xmin-distance-half) & (xs <= xmax+distance+half) &
-                                    (ys >= ymin-distance-half) & (ys <= ymax+distance+half))
+        if candidates is None:
+            candidates = np.arange(len(engine.grid))
+        candidates = candidates[(xs[candidates] >= xmin-distance-half) & (xs[candidates] <= xmax+distance+half) &
+                                (ys[candidates] >= ymin-distance-half) & (ys[candidates] <= ymax+distance+half)]
         squares = shapely.box(xs[candidates]-half, ys[candidates]-half,
                               xs[candidates]+half, ys[candidates]+half)
-        hits = shapely.STRtree(roads.geometry.to_numpy()).query(squares, predicate="dwithin", distance=distance)
-        mask[candidates[np.unique(hits[0])]] = True
+        tree = shapely.STRtree(roads.geometry.to_numpy())
+        if distance == 0:
+            hits = tree.query(squares, predicate="intersects")
+            mask[candidates[np.unique(hits[0])]] = True
+        else:
+            hits, distances = tree.query_nearest(squares, max_distance=distance,
+                                                return_distance=True, all_matches=False)
+            mask[candidates[hits[0][distances <= distance]]] = True
         return mask
 
     def display_path(self):

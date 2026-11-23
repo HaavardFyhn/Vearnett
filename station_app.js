@@ -41,7 +41,7 @@ async function loadEditableScenario(file){
   try{
     const saved=JSON.parse(await file.text());validateSavedView(saved.view);
     if(!window.confirm('Åpne lagret scenario og erstatte det nåværende scenariet?'))return;
-    if(saved.view.controls.some(item=>['road-categories','road-classes'].includes(item.parent))&&!roadOptions){
+    if(saved.view.controls.some(item=>item.parent==='road-categories')&&!roadOptions){
       await initializeRoads();if(!roadOptions?.available)throw new Error('Vegnettet er ikke tilgjengelig');
     }
     if(saved.view.controls.some(item=>item.parent==='coverage-classes')&&!coverageOptions?.available){
@@ -57,6 +57,10 @@ async function loadEditableScenario(file){
         input.parentElement.closest('[id]')?.id===entry.parent&&input.value===entry.value);
       if(!input||!input.closest('aside')||input.type==='file')continue;
       if(input.type==='checkbox')input.checked=entry.checked;else input.value=entry.value;
+    }
+    if(!saved.view.controls.some(entry=>['road-score-4','road-score-5'].includes(entry.id))){
+      const previous=saved.view.controls.find(entry=>entry.id==='road-scores');
+      for(const id of ['road-score-4','road-score-5'])element(id).checked=previous?.checked??true;
     }
     for(const entry of saved.view.details){const details=element(entry.id);if(details?.matches('aside details'))details.open=entry.open;}
     for(const layer of [fixedMarkers,manualMarkers]){if(stationsVisible)layer.addTo(map);else map.removeLayer(layer);}
@@ -76,11 +80,21 @@ async function imageData(url,signal){
 }
 const UNCERTAINTY_LEGEND={low:'Mindre usikkert',high:'Mer usikkert',
   gradient:'linear-gradient(to right,#053061,#6bacd1,#f7f7f7,#e48065,#67001f)'};
-function weatherLegendMarkup(title){
+const DIRECT_P95_LEGEND_TITLE='Anslått 95 %-intervall (± °C)';
+const ROAD_SCORE_COLOURS=['#00bcd4','#ffe119','#9e9600','#fe9a52','#e6007e'];
+function displayRoadScoreClass(value){
+  const scoreClass=Number(value);
+  return scoreClass===5?1:scoreClass===4?2:value;
+}
+function emptyReductionLegendTitle(value,isP95){
+  return `Anslått 95 %-intervall (± °C)`;
+}
+function weatherLegendMarkup(title,fixedP95=false){
   const escape=value=>String(value).replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
   return '<div class="legend"><div class="legend-title">'+escape(title)+'</div>'+
     '<div class="ramp" style="background:'+UNCERTAINTY_LEGEND.gradient+'"></div><div class="ticks"><span>'+
-    UNCERTAINTY_LEGEND.low+'</span><span>'+UNCERTAINTY_LEGEND.high+'</span></div></div>';
+    (fixedP95?'0 °C</span><span style="position:absolute;left:50%;transform:translateX(-50%)">1 °C</span><span>≥3 °C':
+      UNCERTAINTY_LEGEND.low+'</span><span>'+UNCERTAINTY_LEGEND.high)+'</span></div></div>';
 }
 async function compressedJson(value){
   if(typeof CompressionStream==='undefined')throw new Error('HTML-eksport krever en oppdatert nettleser med gzip-støtte');
@@ -92,7 +106,7 @@ async function compressedJson(value){
 async function frozenMapRuntime(){
   const data=JSON.parse(document.getElementById('snapshot').textContent);
   const map=L.map('map',{minZoom:3,maxZoom:15}).setView(data.center,data.zoom);
-  for(const [name,z] of [['weather',400],['coverage',425],['roads',430],['basins',435],['stations',450],['calculation-points',445],['county-borders',440]])
+  for(const [name,z] of [['weather',400],['background-roads',420],['coverage',425],['roads',430],['basins',435],['stations',450],['calculation-points',445],['county-borders',440]])
     map.createPane(name).style.zIndex=z;
   map.getPane('county-borders').style.pointerEvents='none';
   map.getPane('calculation-points').style.pointerEvents='none';
@@ -106,17 +120,13 @@ async function frozenMapRuntime(){
     backgroundFailed=true;note.hidden=false;note.textContent='Bakgrunnskartet kunne ikke lastes. Kontroller internettilkoblingen.';
   }).on('load',()=>{if(backgroundFailed){backgroundFailed=false;note.hidden=true;}});
   backgrounds['Topografisk bakgrunn'].addTo(map);
-  const weather=L.layerGroup(),baselineWeather=L.layerGroup(),backgroundOnly=L.layerGroup(),coverage=L.layerGroup(),
+  const weather=L.layerGroup(),baselineWeather=L.layerGroup(),reductionWeather=L.layerGroup(),placementWeather=L.layerGroup(),backgroundOnly=L.layerGroup(),coverage=L.layerGroup(),
     basins=L.layerGroup(),stations=L.layerGroup(),roads=L.layerGroup(),counties=L.layerGroup(),debug=L.layerGroup();
-  const roadOverview=L.layerGroup(),basinOverview=L.layerGroup();
+  const roadOverview=L.layerGroup(),backgroundRoadOverview=L.layerGroup(),basinOverview=L.layerGroup();
   L.imageOverlay(data.basinOverview.url,data.basinOverview.bounds,{opacity:.75,pane:'basins',interactive:false}).addTo(basinOverview);
-  const weatherPicker=document.getElementById('saved-weather');
-  const savedWeather={id:'saved',label:'Lagret visning'};
-  let activeWeather=savedWeather;
-  for(const item of [savedWeather,...data.full.weather]){
-    const option=document.createElement('option');option.value=item.id;option.textContent=item.label;weatherPicker.append(option);
-  }
-  weatherPicker.value=activeWeather.id;
+  const roadOnly=document.getElementById('saved-road-only');
+  roadOnly.checked=data.weatherExtent==='roads';
+  let activeWeather=data.full.weather.find(item=>item.id===(roadOnly.checked?'roads':'counties'));
   const popupBox=(title,rows)=>{
     const box=document.createElement('div'),heading=document.createElement('strong');
     heading.textContent=title;box.append(heading);
@@ -126,7 +136,7 @@ async function frozenMapRuntime(){
     }
     return box;
   };
-  const propertyLabels={roadid:'Veg',streetname:'Vegnavn',VS_Total:'VegScore',VS_Total_klasse:'VegScore-klasse',
+  const propertyLabels={roadid:'Veg',streetname:'Vegnavn',Vegscore:'Vegscore',VS_Total:'Vegscore',VS_Total_klasse:'Vegscoreklasse',
     length_m:'Lengde (m)',mean_error:'Gjennomsnittlig modellfeil',
     max_error:'Største modellfeil',municipality:'Kommune',
     links:'Antall lenker',overview:'Forenklet oversikt'};
@@ -138,14 +148,16 @@ async function frozenMapRuntime(){
   };
   const vectors=[...data.vectors,...(data.roadPreview?await unpack(data.roadPreview):[])];
   for(const item of vectors){
-    const group=item.pane==='roads'?roadOverview:item.pane==='county-borders'?counties:item.pane==='stations'?stations:debug;
+    const group=item.pane==='roads'?roadOverview:item.pane==='background-roads'?backgroundRoadOverview:
+      item.pane==='county-borders'?counties:item.pane==='stations'?stations:debug;
     L.geoJSON(item.geojson,{pane:item.pane||'overlayPane',style:item.style,
-      interactive:item.pane==='roads',bubblingMouseEvents:false,
+      interactive:item.pane==='roads'&&data.roadScores!==false,bubblingMouseEvents:false,
       pointToLayer:(f,p)=>L.circleMarker(p,{...item.style,pane:item.pane||'overlayPane'}),
       onEachFeature:(feature,layer)=>{
         const properties=feature.properties||{};
         const rows=Object.entries(propertyLabels).filter(([key])=>properties[key]!=null).map(([key,label])=>
-          [label,typeof properties[key]==='boolean'?(properties[key]?'Ja':'Nei'):
+          [label,key==='VS_Total_klasse'?displayRoadScoreClass(properties[key]):
+            typeof properties[key]==='boolean'?(properties[key]?'Ja':'Nei'):
             typeof properties[key]==='object'?JSON.stringify(properties[key]):typeof properties[key]==='number'?Math.round(properties[key]):properties[key]]);
         if(rows.length)layer.bindPopup(popupBox('Veglenke',rows));
       }}).addTo(group);
@@ -154,8 +166,7 @@ async function frozenMapRuntime(){
     const info=item.info||{},rows=[];
     rows.push(['Vegværstasjon',info.svv?'Ja':'Nei'],
       ['Eier',(info.owners||[]).join(', ')||'Ikke oppgitt'],
-      ['Status',item.original?'Opprinnelig plassering':info.removed?'Fjernet fra scenariet':info.original_position?'Flyttet i scenariet':info.sensors_changed||info.added_sensors?.length?'Sensorer endret':''],
-      ['Observasjoner fra',info.first_time?.slice(0,10)],['Observasjoner til',info.last_time?.slice(0,10)]);
+      ['Status',item.original?'Opprinnelig plassering':info.removed?'Fjernet fra scenariet':info.original_position?'Flyttet i scenariet':info.sensors_changed||info.added_sensors?.length?'Sensorer endret':'']);
 
     for(const sensor of info.removed_sensor_labels||[])rows.push(['Fjernet sensor (scenario)',sensor]);
     const box=popupBox(item.title||'Kartmarkør',rows);
@@ -166,7 +177,7 @@ async function frozenMapRuntime(){
     }
     const marker=L.marker(item.position,{pane:item.pane||'markerPane',zIndexOffset:item.zIndexOffset||0,
       interactive:item.interactive!==false,bubblingMouseEvents:false,
-      title:item.title,savedStation:info,savedInactive:item.className?.split(' ').includes('inactive-sensors'),
+      title:item.title,savedStation:info,
       icon:L.divIcon({html:item.html,className:item.className,iconSize:item.size,iconAnchor:item.anchor})})
       .bindPopup(box,{maxWidth:360,maxHeight:350});
     marker.addTo(item.pane==='calculation-points'?debug:stations);
@@ -182,20 +193,36 @@ async function frozenMapRuntime(){
   }
   debug.addTo(stations);
   counties.addTo(map);
-  (data.mode==='climate'?climate:data.mode==='baseline'?baselineWeather:weather).addTo(map);
+  (data.mode==='climate'?climate:data.mode==='baseline'?baselineWeather:data.mode==='reduction'?reductionWeather:data.mode==='placement'?placementWeather:weather).addTo(map);
   counties.addTo(map);
-  if(data.roadsVisible)roads.addTo(map);
+  if(data.roadScores||data.roadsVisible)roads.addTo(map);
+  if(data.roadsVisible)backgroundRoadOverview.addTo(map);
   if(data.stationsVisible)stations.addTo(map);
   if(data.basinsVisible)basins.addTo(map);
-  L.control.layers({'Usikkerhet':weather,'Grunnett':baselineWeather,'Vegklimasonekart':climate,
+  L.control.layers({'Usikkerhet':weather,'Grunnett':baselineWeather,'Endring i usikkerhet':reductionWeather,'Plasseringsgevinst':placementWeather,'Vegklimasonekart':climate,
     'Bare bakgrunnskart':backgroundOnly},overlays,{collapsed:false,position:'topright'}).addTo(map);
   L.control.scale({imperial:false}).addTo(map);
   const legend=document.getElementById('legend-container');
   const updateLegend=()=>{
     legend.replaceChildren();
     if(map.hasLayer(weather)||map.hasLayer(baselineWeather)){
-      legend.innerHTML=activeWeather.id==='saved'?(map.hasLayer(weather)&&data.mode!=='baseline'?data.legend:data.weatherLegend):
-        weatherLegendMarkup(activeWeather.label);
+      const fixedP95=activeWeather.dataset==='temperature:direct_p95';
+      legend.innerHTML=weatherLegendMarkup(fixedP95?DIRECT_P95_LEGEND_TITLE:'Temperatur',fixedP95);
+    }
+    if(map.hasLayer(reductionWeather)){
+      legend.innerHTML=weatherLegendMarkup(activeWeather.empty_reference_rmse?
+        emptyReductionLegendTitle(activeWeather.empty_reference_rmse,activeWeather.dataset==='temperature:direct_p95'):
+        'Endringer fra opprinnelig grunnnett');
+    }
+    if(map.hasLayer(placementWeather)){
+      const box=document.createElement('div');box.className='legend';
+      const heading=document.createElement('div');heading.className='legend-title';heading.textContent='Plasseringsgevinst';
+      if(data.full.placement.empty_reference_rmse)heading.textContent+=` · lagret referanse ${data.full.placement.empty_reference_rmse.toLocaleString('nb-NO')} °C`;
+      const ramp=document.createElement('div');ramp.className='ramp';
+      ramp.style.background='linear-gradient(to right,#ffffcc,#ffeda0,#feb24c,#f03b20,#800026)';
+      const ticks=document.createElement('div');ticks.className='ticks';
+      for(const text of ['Mindre gevinst','Mer gevinst']){const item=document.createElement('span');item.textContent=text;ticks.append(item);}
+      box.append(heading,ramp,ticks);legend.append(box);
     }
     if(map.hasLayer(climate)){
       const box=document.createElement('div');box.className='legend climate-snapshot-legend';
@@ -221,35 +248,36 @@ async function frozenMapRuntime(){
   opacity.value=data.opacity;
   opacity.oninput=()=>{
     const value=1-Number(opacity.value)/100;
-    for(const group of [weather,baselineWeather])group.eachLayer(layer=>layer.setOpacity(value));
+    for(const group of [weather,baselineWeather,reductionWeather,placementWeather])group.eachLayer(layer=>layer.setOpacity(value));
     climate.setOpacity(value);
   };
   const selectWeather=()=>{
-    activeWeather=[savedWeather,...data.full.weather].find(item=>item.id===weatherPicker.value);
-    for(const [group,baseline] of [[weather,false],[baselineWeather,true]]){
+    activeWeather=data.full.weather.find(item=>item.id===(roadOnly.checked?'roads':'counties'));
+    for(const [group,field] of [[weather,'url'],[baselineWeather,'baseline'],[reductionWeather,'reduction']]){
       group.clearLayers();
-      const images=activeWeather.id==='saved'?(baseline?[data.baseline]:
-        data.mode==='baseline'?[data.uncertainty]:data.images):
-        [{...activeWeather,url:baseline?activeWeather.baseline:activeWeather.url}];
-      for(const image of images)L.imageOverlay(image.url,image.bounds,{
-        opacity:1-Number(opacity.value)/100,pane:'weather',interactive:false,zIndex:image.zIndex||200}).addTo(group);
+      L.imageOverlay(activeWeather[field],activeWeather.bounds,{
+        opacity:1-Number(opacity.value)/100,pane:'weather',interactive:false}).addTo(group);
     }
+    placementWeather.clearLayers();
+    L.imageOverlay(roadOnly.checked?data.full.placement.roads_url:data.full.placement.url,
+      data.full.placement.bounds,{opacity:1-Number(opacity.value)/100,pane:'weather',interactive:false}).addTo(placementWeather);
     stations.eachLayer(layer=>{
       if(!(layer instanceof L.Marker))return;
       const info=layer.options.savedStation;
       if(!info)return;
       const sensors=[...(info.sensors||[]),...(info.added_sensors||[])];
-      layer.getElement()?.classList.toggle('inactive-sensors',activeWeather.id==='saved'?layer.options.savedInactive:!sensors.includes(activeWeather.id));
+      layer.getElement()?.classList.toggle('inactive-sensors',!sensors.includes('temperature'));
     });
     updateLegend();
   };
-  weatherPicker.onchange=selectWeather;
+  roadOnly.onchange=selectWeather;
   map.on('baselayerchange overlayadd overlayremove',updateLegend);
   map.on('layeradd',event=>{if(event.layer===stations)selectWeather();});
   selectWeather();
   const detailStatus=document.getElementById('detail-status');
   // One canvas hit-tests both layers; separate canvases block clicks through empty pixels.
   const detailRenderer=L.canvas({padding:.15,pane:'basins'});
+  const backgroundRoadRenderer=data.roadScores===false?L.canvas({padding:.15,pane:'roads'}):detailRenderer;
   let detailSerial=0;
   const decoded=new Map();
   const intersects=(bbox,bounds)=>bbox[0]<=bounds.getEast()&&bbox[2]>=bounds.getWest()&&bbox[1]<=bounds.getNorth()&&bbox[3]>=bounds.getSouth();
@@ -284,12 +312,14 @@ async function frozenMapRuntime(){
             detailStatus.textContent='Zoom nærmere for å vise alle detaljene i utsnittet.';
             return;
           }
-          const palette=['#00bcd4','#ffe119','#f58231','#e6007e','#252525'];
           L.geoJSON({type:'FeatureCollection',features},{
-            renderer:detailRenderer,bubblingMouseEvents:false,pane:'basins',
+            renderer:kind==='roads'?backgroundRoadRenderer:detailRenderer,bubblingMouseEvents:false,
+            pane:kind==='roads'&&data.roadScores===false?'roads':'basins',
+            interactive:kind!=='roads'||data.roadScores!==false,
             style:feature=>kind==='coverage'?{stroke:false,
               fillColor:data.coverageClasses.find(item=>item.value===feature.properties.value).color,fillOpacity:.85}:
-              kind==='roads'?{color:palette[Number(feature.properties.VS_Total_klasse)-1]||'#7b8480',weight:2.5,opacity:.95}:
+              kind==='roads'?(data.roadScores===false?{color:'#000',weight:1.5,opacity:.9}:
+                {color:ROAD_SCORE_COLOURS[Number(feature.properties.VS_Total_klasse)-1]||'#7b8480',weight:2.5,opacity:.95}):
               {color:'#00a6ca',weight:1,fillColor:'#00bce4',fillOpacity:.25},
             onEachFeature:(feature,layer)=>{
               const p=feature.properties;
@@ -378,10 +408,12 @@ async function saveFrozenMap(){
     if(!getRoadSettings(true))throw new Error('Vegfiltrene kunne ikke lastes');
     const viewKey=JSON.stringify(savedView());
     const snapshot={center:[map.getCenter().lat,map.getCenter().lng],zoom:map.getZoom(),
-      title:document.title,saved:new Date().toISOString(),images:[],vectors:[],markers:[],
-      legend:document.querySelector('.legend')?.outerHTML||'',
-      mode,opacity:element('opacity').value,stationsVisible,basinsVisible:element('kuldehull-show').checked,
-      dataset:state.dataset,roadsVisible:element('road-show').checked,stationOwners:state.station_owners};
+      title:document.title,saved:new Date().toISOString(),vectors:[],markers:[],
+      mode:['climate','baseline','reduction','placement'].includes(mode)?mode:'uncertainty',
+      weatherExtent:element('road-corridor').checked?'roads':'counties',
+      opacity:element('opacity').value,stationsVisible,basinsVisible:element('kuldehull-show').checked,
+      dataset:state.dataset,roadsVisible:element('road-show').checked,
+      roadScores:selectedRoadScoreClasses().length>0,stationOwners:state.station_owners};
     const revision=state.revision;
     const layers=[];map.eachLayer(layer=>layers.push(layer));
     for(const group of [fixedMarkers,manualMarkers])if(!map.hasLayer(group))group.eachLayer(layer=>layers.push(layer));
@@ -389,13 +421,7 @@ async function saveFrozenMap(){
     const exportLayers=layers.filter(layer=>layer.options?.pane!=='calculation-points'&&layer!==kuldehullOverlay&&!coverageImages.has(layer));
     exportPoints.eachLayer(layer=>exportLayers.push(layer));
     for(const layer of exportLayers){
-      if(layer instanceof L.ImageOverlay){
-        const bounds=layer.getBounds();
-        snapshot.images.push({url:await imageData(layer.getElement().src),
-          bounds:[[bounds.getSouth(),bounds.getWest()],[bounds.getNorth(),bounds.getEast()]],
-          opacity:layer.options.opacity,zIndex:layer.options.zIndex||200,pane:layer.options.pane,
-          basins:layer===kuldehullOverlay});
-      }else if(layer instanceof L.Marker){
+      if(layer instanceof L.Marker){
         const icon=layer.options.icon,point=layer.getLatLng();
         if(typeof icon?.options?.html!=='string')throw new Error('En kartmarkør kan ikke lagres');
         const station=layer.options.savedStation||[...state.fixed_stations,...state.stations].find(s=>
@@ -426,17 +452,6 @@ async function saveFrozenMap(){
     const climate=await climateResponse.json();
     if(!climateResponse.ok)throw new Error(climate.error||'Klimasonene kunne ikke lagres');
     snapshot.climate={...climate,url:await imageData('/api/climate.png?size=1600')};
-    snapshot.weatherLegend=weatherLegendMarkup(state.weather_label||state.layers?.map(layer=>layer.split(':')[0]).join(', ')||'Usikkerhet');
-    const weatherQuery=new URLSearchParams({size:1600});
-    const roadSettings=getRoadSettings();
-    if(roadSettings)weatherQuery.set('roads',JSON.stringify(roadSettings));
-    const basinSettings=getKuldehullSettings();
-    if(basinSettings.only)weatherQuery.set('kuldehull',JSON.stringify(basinSettings));
-    weatherQuery.set('rmse_min',rmseMinimum());
-    const weatherBounds=basinSettings.only?[[basinSettings.bounds[1],basinSettings.bounds[0]],
-      [basinSettings.bounds[3],basinSettings.bounds[2]]]:state.bounds;
-    snapshot.baseline={url:await imageData(`/api/map.png?mode=baseline&${weatherQuery}`),bounds:weatherBounds};
-    snapshot.uncertainty={url:await imageData(`/api/map.png?mode=uncertainty&${weatherQuery}`),bounds:weatherBounds};
     const basinBounds=state.bounds;
     const basinQuery=new URLSearchParams({bounds:JSON.stringify([basinBounds[0][1],basinBounds[0][0],basinBounds[1][1],basinBounds[1][0]]),
       depth:element('kuldehull-depth').value,width:800,height:1600});
@@ -446,23 +461,29 @@ async function saveFrozenMap(){
         classes:JSON.stringify(snapshot.coverageClasses.map(item=>item.value))});
       snapshot.coverageOverview={url:await imageData(`/api/coverage.png?${query}`),bounds:basinBounds};
     }
-    if(mode==='climate'){
-      snapshot.images=[{...snapshot.uncertainty,opacity:overlayOpacity(),pane:'overlayPane'}];
-      snapshot.legend=snapshot.weatherLegend;
-    }
-    snapshot.roadPreview=await compressedJson(snapshot.vectors.filter(item=>item.pane==='roads'));
+    const roadPreview=snapshot.vectors.filter(item=>item.pane==='roads');
+    snapshot.roadPreview=await compressedJson(roadPreview);
     snapshot.vectors=snapshot.vectors.filter(item=>item.pane!=='roads');
     const fullResponse=await fetch('/api/snapshot-data',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({revision,roads:getRoadSettings(true),depth:Number(element('kuldehull-depth').value),
-        basins_only:element('kuldehull-only').checked,
+      body:JSON.stringify({revision,roads:getRoadSettings(true),roads_visible:snapshot.roadsVisible,road_scores:snapshot.roadScores,
+        weather_roads:getWeatherRoadSettings(true),include_placement:true,depth:Number(element('kuldehull-depth').value),
         coverage_classes:snapshot.coverageClasses.map(item=>item.value)})});
     snapshot.full=await fullResponse.json();
     if(!fullResponse.ok)throw new Error(snapshot.full.error||'Kartdataene kunne ikke lagres');
+    if(snapshot.full.road_overview)snapshot.roadPreview=await compressedJson([...roadPreview,{
+      geojson:snapshot.full.road_overview,pane:'background-roads',style:{color:'#000',weight:1.5,opacity:.9}
+    }]);
     if(snapshot.full.revision!==revision||state.revision!==revision)throw new Error('Scenariet ble endret under lagring. Prøv igjen.');
     if(viewKey!==JSON.stringify(savedView()))throw new Error('Kartvisningen ble endret under lagring. Prøv igjen.');
+    const corridor=snapshot.full.weather.find(item=>item.id==='roads');
+    if(!corridor)throw new Error('Usikkerhetskart langs veger mangler i eksporten');
+    const corridorLabel=Number(corridor.distance_m).toLocaleString('nb-NO')+' m';
     const styles=[...document.querySelectorAll('style')].map(style=>style.textContent).join('\n');
     const payload=JSON.stringify(snapshot).replace(/</g,'\\u003c');
-    const runtime='const UNCERTAINTY_LEGEND='+JSON.stringify(UNCERTAINTY_LEGEND)+';'+weatherLegendMarkup.toString()+';'+
+    const runtime='const UNCERTAINTY_LEGEND='+JSON.stringify(UNCERTAINTY_LEGEND)+';'+
+      'const DIRECT_P95_LEGEND_TITLE='+JSON.stringify(DIRECT_P95_LEGEND_TITLE)+';'+
+      'const ROAD_SCORE_COLOURS='+JSON.stringify(ROAD_SCORE_COLOURS)+';'+displayRoadScoreClass.toString()+';'+
+      emptyReductionLegendTitle.toString()+';'+weatherLegendMarkup.toString()+';'+
       '('+frozenMapRuntime.toString()+')().catch(failure=>{const note=document.getElementById("saved-note");note.hidden=false;note.textContent=failure.message;});';
     const snapshotStyle=`
       body{display:block;margin:0}
@@ -486,7 +507,7 @@ async function saveFrozenMap(){
     const html='<!doctype html><html lang="nb"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'+
       '<title>Værnett</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><style>'+
       styles+'</style><style>'+snapshotStyle+'</style></head><body>'+
-      '<div id="map"></div><div id="saved-note" role="status" hidden></div><div id="saved-tools"><label>Værfenomen <select id="saved-weather"></select></label><label>Kartlagets gjennomsiktighet <input id="saved-opacity" type="range" min="0" max="100" step="5"></label><div id="detail-status" role="status"></div></div><div id="legend-container"></div><script type="application/json" id="snapshot">'+
+      '<div id="map"></div><div id="saved-note" role="status" hidden></div><div id="saved-tools"><label><input id="saved-road-only" type="checkbox"> Vis usikkerhet langs veg</label><label>Viser usikkerhet inntil '+corridorLabel+' fra veg</label><label>Kartlagets gjennomsiktighet <input id="saved-opacity" type="range" min="0" max="100" step="5"></label><div id="detail-status" role="status"></div></div><div id="legend-container"></div><script type="application/json" id="snapshot">'+
       payload+'</script><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>'+runtime+'</script></body></html>';
     downloadSavedFile(html,'text/html','vaernett-kart.html');
   }catch(failure){error(failure.message);}
@@ -541,7 +562,7 @@ function scheduleCoverage(){
   },150);
 }
 async function inspectCoverage(location){
-  if(busy)return;
+  if(busy)return true;
   const serial=++inspectionSerial,content=document.createElement('div');
   content.textContent='Laster dekningsgrad…';
   const popup=L.popup().setLatLng(location).setContent(content).openOn(map);
@@ -550,9 +571,11 @@ async function inspectCoverage(location){
       classes:JSON.stringify(coverageClasses())}));
     const result=await response.json();
     if(!response.ok)throw new Error(result.error||'Dekningsgrad kunne ikke lastes');
-    if(serial!==inspectionSerial||!map.hasLayer(popup))return;
-    content.textContent=result.found?result.label:'Ingen valgt kandidatkategori i denne 250 m vegcellen.';
+    if(serial!==inspectionSerial||!map.hasLayer(popup))return true;
+    if(!result.found){map.closePopup(popup);return false;}
+    content.textContent=result.label;
   }catch(failure){if(serial===inspectionSerial)content.textContent=failure.message;}
+  return true;
 }
 async function initializeCoverage(){
   try{
@@ -577,7 +600,8 @@ const icons = () => { if (window.lucide) lucide.createIcons(); };
 const number = (value, digits=4) => new Intl.NumberFormat('nb-NO',{minimumFractionDigits:digits,maximumFractionDigits:digits}).format(value);
 const shortNumber = value => new Intl.NumberFormat('nb-NO',{maximumSignificantDigits:3}).format(value);
 const overlayOpacity = () => 1-Number(element('opacity').value)/100;
-const selectedNetwork = () => state.network==='frost'&&state.pross_only?'svv':state.network;
+const selectedNetwork = () => state.network==='frost'&&state.pross_only?(state.include_met?'svv_met':'svv'):state.network;
+const selectedPlacementNetwork = () => ({frost:'all',svv:'svv',svv_met:'svv-met',empty:'empty'})[selectedNetwork()]||'greedy';
 const terrainLabels={elevation:'Høyde over havet',coast_dist_fjord:'Avstand til fjord',coast_dist_ocean:'Avstand til åpent hav'};
 const loadingTasks=new Map();
 let loadingSerial=0,loadingStarted=0,loadingFinished=0,loadingFailed=false;
@@ -649,13 +673,24 @@ map.createPane('county-borders');map.getPane('county-borders').style.zIndex=440;
 map.getPane('county-borders').style.pointerEvents='none';
 const countyBorders=L.geoJSON(null,{pane:'county-borders',interactive:false,
   style:{color:'#4b5359',weight:1,opacity:.8,fill:false}}).addTo(map);
+map.createPane('background-roads');map.getPane('background-roads').style.zIndex=420;
+map.getPane('background-roads').style.pointerEvents='none';
+const backgroundRoads=L.tileLayer('/api/roads/background/{z}/{x}/{y}.png',{
+  pane:'background-roads',maxZoom:22,maxNativeZoom:18,updateWhenIdle:true,
+  keepBuffer:2,bounds:[[57,3],[72,33]]
+});
+let backgroundRoadKey=null;
+let backgroundRoadError=false;
+backgroundRoads.on('tileerror',()=>{
+  if(!backgroundRoadError){backgroundRoadError=true;error('Bakgrunnsvegnettet kunne ikke lastes.');}
+});
 const roadRenderer=L.canvas({pane:'roads',padding:0.3});
 const roadCasing=L.geoJSON(null,{pane:'roads',renderer:roadRenderer,interactive:false,style:{color:'#fff',weight:4,opacity:.85}}).addTo(map);
-const roadLines=L.geoJSON(null,{pane:'roads',renderer:roadRenderer,bubblingMouseEvents:false,style:roadStyle,onEachFeature:(feature,layer)=>layer.on('click',event=>{
+const roadLines=L.geoJSON(null,{pane:'roads',renderer:roadRenderer,bubblingMouseEvents:false,style:roadStyle,onEachFeature:(feature,layer)=>layer.on('click',async event=>{
   L.DomEvent.stopPropagation(event.originalEvent);clearPreview();
   if(event.originalEvent.ctrlKey||event.originalEvent.metaKey)inspectKuldehull(event.latlng);
-  else if(event.originalEvent.shiftKey)inspectBestStation(event.latlng);
-  else if(element('coverage-show').checked)inspectCoverage(event.latlng);
+  else if(event.originalEvent.altKey)inspectBestStation(event.latlng);
+  else if(element('coverage-show').checked&&await inspectCoverage(event.latlng))return;
   else showRoadPopup(feature,event.latlng);
 })}).addTo(map);
 
@@ -678,20 +713,15 @@ function controls() {
   element('network').disabled = busy || !state;
   element('phenomena').disabled = busy || !state;
   element('network').querySelector('[value="svv"]').disabled=!state?.pross_available;
+  element('network').querySelector('[value="svv_met"]').disabled=!state?.met_available;
   element('station-since').disabled=busy||!state||state.network!=='frost';
   element('station-date-apply').disabled=busy||!stationDatePreview;
   document.querySelectorAll('#county-options input,#county-all,#county-none').forEach(input=>input.disabled=busy||!state);
   element('terrain-layer').disabled=busy||!state||!terrainCatalogs.has(state.cell_m);
   for(const id of ['kuldehull-show','kuldehull-only','kuldehull-depth'])element(id).disabled=busy||!state||!kuldehullAvailable;
-  element('selected-station').disabled=busy||!state||(!element('selected-station').value&&element('selected-station').options.length<=1);
   for (const id of ['undo','reset']) element(id).disabled = busy || !state?.stations.length;
   document.querySelectorAll('[data-remove]').forEach(button => button.disabled = busy);
-  element('remove-frost').hidden=!state||state.network!=='frost'||!state.frost_ready;
-  const selectedFrostEdit=(state?.frost_edits||[]).find(edit=>edit.station_id===state?.selected_station?.station_id);
-  element('remove-frost').disabled=busy||!state||state.selected_station?.kind!=='frost'||Boolean(selectedFrostEdit?.removed);
-  element('restore-frost').hidden=!(state?.frost_edits?.length);
-  element('restore-frost').disabled=busy||!state?.frost_edits?.length;
-  document.querySelectorAll('[data-comparison]').forEach(button=>button.disabled=busy||!state);
+  element('comparison-baseline').disabled=busy||!state;
   element('export').setAttribute('aria-disabled',String(busy || !state || state.mean_rmse===null));
 }
 
@@ -720,11 +750,7 @@ function render() {
   if(state.colour_reference_warning)error(state.colour_reference_warning);
     map.closePopup();
     element('comparison-tabs').hidden=state.network!=='frost';
-    document.querySelectorAll('[data-comparison]').forEach(button=>{
-      const active=button.dataset.comparison===state.comparison_scope;
-      button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;
-    });
-    element('comparison-panel').setAttribute('aria-labelledby',`comparison-${state.comparison_scope}`);
+    element('comparison-baseline').setAttribute('aria-pressed',String(state.comparison_scope==='baseline'));
     const [phenomenon,kind]=state.dataset.split(':');
     const options=new Map((state.layer_options||[]).map(item=>[item.phenomenon,item]));
     element('phenomena').querySelectorAll('input[data-phenomenon]').forEach(input=>{
@@ -751,28 +777,15 @@ function render() {
     }
     }
     element('network').value=selectedNetwork();
-    element('network-count').textContent=`${number(state.fixed_count+state.stations.length,0)} stasjoner`;
+    element('station-radius-note').hidden=!state.station_radius_m;
+    //element('station-radius-note').textContent=state.station_radius_m?
+    //  `Eksperiment: nye/flyttede stasjoner påvirker bare ruter innen ${number(state.station_radius_m/1000,0)} km. Grunnnettet er uendret.`:'';
+    element('network-count').textContent=`${number(state.fixed_count+state.stations.length,0)} målepunkter`;
     element('manual-count').textContent=state.stations.length;
     document.title=`Værnett`;
     showProgress(state.precompute_jobs||[]);
     element('class-definition').hidden=kind!=='class';
     const selected=state.selected_station;
-    const selection=element('selected-station');selection.replaceChildren();
-    const option=(type,index,label)=>{const item=document.createElement('option');item.value=`${type}:${index}`;item.textContent=label;selection.append(item);};
-    if(state.network==='frost'){
-      const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Velg en værstasjon';selection.append(placeholder);
-      state.fixed_stations.forEach(station=>option('frost',station.station_id,`${station.station_id} · ${station.name}${station.removed?' · fjernet':''}`));
-    }
-    if(state.network==='greedy')for(let index=0;index<state.baseline;index++)option('greedy',index,`Foreslått stasjon ${index+1}`);
-    state.stations.forEach((station,index)=>option('manual',station.id,`Ny stasjon ${index+1}`));
-    if(!selection.options.length){const empty=document.createElement('option');empty.value='';empty.textContent='Ingen stasjoner å velge';selection.append(empty);}
-    selection.value=selected?`${selected.kind}:${selected.kind==='frost'?selected.station_id:selected.index}`:'';
-    const frostEdits=state.frost_edits||[];
-    const frostEditStatus=element('frost-edit-status');
-    frostEditStatus.hidden=!frostEdits.length;
-    frostEditStatus.textContent=frostEdits.length?`${frostEdits.length} Frost-stasjoner endret i scenariet. Gjenopprett opprinnelig nett for å angre alle endringene.`:'';
-    const comparisonDescription={baseline:'Samlet forskjell fra opprinnelig grunnnett',move:'Bare valgt flytting · andre endringer beholdes',removal:'Økt usikkerhet ved valgt fjerning · andre endringer beholdes',contribution:'Forskjell med/uten valgt stasjon · andre endringer beholdes'};
-    element('selected-description').textContent=state.comparison==='baseline'?comparisonDescription.baseline:state.selected_station_label?`${state.selected_station_label} · ${comparisonDescription[state.comparison]}`:'Ingen stasjon valgt';
     fixedMarkers.clearLayers();manualMarkers.clearLayers();
     const checkedSensors=new Set(state.layers.map(dataset=>dataset.split(':')[0]));
     const hasCheckedSensor=station=>checkedSensors.size>0&&(!station.sensors||!state.layer_options?.length||station.sensors.some(sensor=>checkedSensors.has(sensor)));
@@ -781,7 +794,8 @@ function render() {
       const allSensors=[...new Set([...(station.sensors||[]),...(proposal?.sensors||[])])];
       const inactive=!hasCheckedSensor({...station,sensors:allSensors});
       const tooltip=document.createElement('span');
-      tooltip.textContent=station.kind==='observation'?`${station.station_id} · ${station.name} · ${station.first_time.slice(0,10)}–${station.last_time.slice(0,10)}`:`Foreslått stasjon ${station.rank}`;
+      tooltip.textContent=station.kind==='observation'?`${station.station_id} · ${station.name}`:`Foreslått stasjon ${station.rank}`;
+      //tooltip.textContent=station.kind==='observation'?`${station.station_id} · ${station.name} · ${station.first_time.slice(0,10)}–${station.last_time.slice(0,10)}`:`Foreslått stasjon ${station.rank}`;
       if(station.removed)tooltip.textContent+=' · Fjernet fra scenariet';
       const selectionKind=station.kind==='observation'?'frost':'greedy';
       const selectionIndex=station.kind==='observation'?station.index:station.rank-1;
@@ -822,7 +836,7 @@ function render() {
       const isSelected=selected?.kind==='manual'&&selected.index===station.id;
       const manualPie=sensorPie(station.sensors||[]);
       const icon=L.divIcon({className:`new-pin${!hasCheckedSensor(station)?' inactive-sensors':''}${isSelected?' selected':''}`,html:`<span class="new-pin-pie"${manualPie?` style="background:${manualPie}"`:''}>${index+1}</span>`,iconSize:[24,24],iconAnchor:[12,12]});
-      if(!attached)L.marker([station.lat,station.lon],{icon,draggable:element('station-move-mode').checked,zIndexOffset:1000,title:`Vis påvirket areal for ny stasjon ${index+1}`,alt:`Ny stasjon ${index+1}`,bubblingMouseEvents:false}).bindTooltip(`Ny stasjon ${index+1} · ${number(station.elevation,0)} m`).on('click',async event=>{
+      if(!attached)L.marker([station.lat,station.lon],{icon,draggable:element('station-move-mode').checked,zIndexOffset:1000,title:element('station-move-mode').checked?'Dra for å flytte værstasjonen':'Skru på flyttemodus for å flytte stasjonen',alt:`Nytt målepunkt ${index+1}`,bubblingMouseEvents:false}).bindTooltip(`Nytt målepunkt ${index+1}`).on('click',async event=>{
         L.DomEvent.stopPropagation(event.originalEvent);
         await openManualStation(station,index);
       }).on('dragstart',clearPreview).on('dragend',async event=>{
@@ -832,16 +846,16 @@ function render() {
       const item=document.createElement('li');item.className='station';
       const badge=document.createElement('span');badge.className='station-number';badge.textContent=index+1;
       const info=document.createElement('button');info.className='station-select';info.setAttribute('aria-pressed',String(isSelected));info.title=`Vis ny stasjon ${index+1} og endre sensorer`;info.onclick=()=>openManualStation(station,index);
-      const name=document.createElement('strong');name.textContent=`Ny stasjon ${index+1} · ${number(station.elevation,0)} m`;
+      const name=document.createElement('strong');name.textContent=`Nytt målepunkt ${index+1}`;
       const coordinates=document.createElement('small');coordinates.textContent=`${number(station.lat)}° N  ${number(station.lon)}° Ø`;
       const sensorLine=document.createElement('small');sensorLine.className='station-sensors';
       for(const sensor of station.sensors||[])sensorLine.append(sensorDot(sensor));
       sensorLine.title=(station.sensors||[]).map(sensor=>SENSORS[sensor]?.[0]||sensor).join(', ');
       info.append(name,coordinates,sensorLine);
-      const remove=document.createElement('button');remove.className='icon-button';remove.dataset.remove=station.id;remove.title=`Fjern ny stasjon ${index+1}`;remove.setAttribute('aria-label',remove.title);remove.innerHTML='<i data-lucide="trash-2"></i>';remove.onclick=()=>requestState({action:'remove',id:station.id});
+      const remove=document.createElement('button');remove.className='icon-button';remove.dataset.remove=station.id;remove.title=`Fjern nytt målepunkt ${index+1}`;remove.setAttribute('aria-label',remove.title);remove.innerHTML='<i data-lucide="trash-2"></i>';remove.onclick=()=>requestState({action:'remove',id:station.id});
       item.append(badge,info,remove);element('stations').append(item);
     });
-    element('empty').hidden=state.stations.length>0;
+    //element('empty').hidden=state.stations.length>0;
     renderCalculationPoints();
     icons();loadTerrainOptions();updateMap();scheduleRoads();scheduleKuldehull();scheduleCoverage();
   }
@@ -865,7 +879,7 @@ function buildCalculationPoints(group,includeAll=false){
         pane:'calculation-points',color:'#596861',weight:1,opacity:.65,dashArray:'2 4',interactive:false
       }).addTo(group);
       const label=document.createElement('span');
-      label.textContent=`${station.station_id||'Ny stasjon'} · Beregningspunkt · ${number(point.cell_m,0)} m-rute`;
+      label.textContent=`${station.station_id||'Nytt målepunkt'} · Beregningspunkt · ${number(point.cell_m,0)} m-rute`;
       L.circleMarker([point.lat,point.lon],{pane:'calculation-points',radius:3,color:'#596861',
         weight:1,fillColor:'#fff',fillOpacity:.75,bubblingMouseEvents:false
       }).bindTooltip(label).addTo(group);
@@ -873,17 +887,209 @@ function buildCalculationPoints(group,includeAll=false){
   }
 }
 
+let activeMapImage=null,pendingMapImage=null;
+let placementTileLayer=null,placementTileKey=null,placementTileLoading=null,placementPaintFrame=null;
+let uncertaintyTileLayer=null,uncertaintyTileKey=null,uncertaintyTileLoading=null;
+function paintRasterCanvas(canvas,cutoff){
+  if(!canvas.rasterValues||canvas.rasterCutoff===cutoff)return;
+  const pixels=canvas.rasterPixels.data,source=canvas.rasterColours,values=canvas.rasterValues;
+  for(let i=0;i<values.length;i++)pixels[i*4+3]=cutoff==null||values[i]>cutoff?source[i*4+3]:0;
+  canvas.getContext('2d').putImageData(canvas.rasterPixels,0,0);
+  canvas.rasterCutoff=cutoff;
+}
+async function loadRasterCanvas(canvas,url,signal,cutoff=undefined){
+  const response=await nativeFetch(url,{signal});
+  if(!response.ok)throw new Error('Kartdataene kunne ikke lastes');
+  const buffer=await response.arrayBuffer();
+  if(buffer.byteLength<8)throw new Error('Kartlaget har ugyldige data');
+  const header=new DataView(buffer),width=header.getUint32(0,true),height=header.getUint32(4,true),count=width*height;
+  if(!width||!height||buffer.byteLength!==8+count*8)throw new Error('Kartlaget har ugyldige data');
+  canvas.width=width;canvas.height=height;
+  canvas.rasterValues=new Float32Array(buffer,8,count);
+  canvas.rasterColours=new Uint8ClampedArray(buffer,8+count*4,count*4);
+  canvas.rasterPixels=canvas.getContext('2d').createImageData(width,height);
+  canvas.rasterPixels.data.set(canvas.rasterColours);
+  paintRasterCanvas(canvas,cutoff===undefined?(rmseMinimum()||null):cutoff);
+}
+function repaintMapRaster(){
+  if(placementPaintFrame!==null)return;
+  placementPaintFrame=requestAnimationFrame(()=>{
+    placementPaintFrame=null;
+    const cutoff=rmseMinimum()||null;
+    const tileLayers=[placementTileLayer,uncertaintyTileLayer].filter(Boolean);
+    if(tileLayers.length){
+      for(const layer of tileLayers)for(const tile of Object.values(layer._tiles))paintRasterCanvas(tile.el,cutoff);
+    }else if(overlay?.rasterCanvas)paintRasterCanvas(overlay.rasterCanvas,cutoff);
+  });
+}
+function rasterCanvasOverlay(canvas,bounds,options){
+  const Raster=L.ImageOverlay.extend({
+    _initImage(){
+      this._image=canvas;
+      L.DomUtil.addClass(canvas,`leaflet-image-layer ${this._zoomAnimated?'leaflet-zoom-animated':''}`);
+      canvas.onselectstart=L.Util.falseFn;canvas.onmousemove=L.Util.falseFn;
+    }
+  });
+  const layer=new Raster('',bounds,options);
+  layer.rasterCanvas=canvas;
+  return layer;
+}
+function createRasterOverlay(url,bounds,options){
+  const canvas=document.createElement('canvas'),controller=new AbortController();
+  const layer=rasterCanvasOverlay(canvas,bounds,options);
+  layer.loadRaster=()=>loadRasterCanvas(canvas,url,controller.signal).then(()=>layer.fire('load'))
+    .catch(failure=>{if(failure.name!=='AbortError')layer.fire('error',{error:failure});});
+  layer.once('remove',()=>controller.abort());
+  return layer;
+}
+function createRasterTileLayer(url,options){
+  const Tiles=L.GridLayer.extend({
+    createTile(coords,done){
+      const canvas=document.createElement('canvas');canvas.width=canvas.height=256;
+      const controller=new AbortController();canvas.placementController=controller;
+      loadRasterCanvas(canvas,L.Util.template(url,coords),controller.signal).then(()=>done(null,canvas))
+        .catch(failure=>{if(failure.name!=='AbortError')done(failure,canvas);});
+      return canvas;
+    }
+  });
+  const layer=new Tiles(options);
+  layer.on('tileunload',event=>event.tile.placementController?.abort());
+  return layer;
+}
+function removePlacementTiles(){
+  if(!placementTileLayer)return;
+  map.removeLayer(placementTileLayer);
+  if(overlay===placementTileLayer)overlay=null;
+  placementTileLayer=null;placementTileKey=null;
+  if(placementPaintFrame!==null){cancelAnimationFrame(placementPaintFrame);placementPaintFrame=null;}
+  if(placementTileLoading!==null){finishLoading(placementTileLoading);placementTileLoading=null;}
+}
+function removeUncertaintyTiles(){
+  if(!uncertaintyTileLayer)return;
+  map.removeLayer(uncertaintyTileLayer);
+  if(overlay===uncertaintyTileLayer)overlay=null;
+  uncertaintyTileLayer=null;uncertaintyTileKey=null;
+  if(uncertaintyTileLoading!==null){finishLoading(uncertaintyTileLoading);uncertaintyTileLoading=null;}
+}
+function showPlacementTiles(layer,settings){
+  const roads=settings?Object.fromEntries(Object.entries(settings).filter(([key])=>key!=='bounds')):null;
+  const query=new URLSearchParams({dataset:state.dataset,network:selectedPlacementNetwork(),version:layer.tile_version,
+    counties:JSON.stringify(state.counties)});
+  if(roads)query.set('roads',JSON.stringify(roads));
+  const key=query.toString();
+  if(placementTileKey===key&&placementTileLayer){repaintMapRaster();return;}
+  overlaySerial++;overlayKey=null;cancelQueuedMapImage();removePlacementTiles();
+  if(overlay){map.removeLayer(overlay);overlay=null;}
+  placementTileKey=key;
+  const next=createRasterTileLayer(`/api/placement/tiles/{z}/{x}/{y}.bin?${key}`,{
+    pane:'overlayPane',opacity:overlayOpacity(),bounds:layer.bounds,noWrap:true,maxNativeZoom:12,maxZoom:18,
+    updateWhenIdle:true,keepBuffer:2
+  });
+  let failed=false;
+  next.on('loading',()=>{
+    if(next!==placementTileLayer)return;
+    failed=false;
+    if(placementTileLoading===null)placementTileLoading=beginLoading('Laster plasseringsgevinst');
+  });
+  next.on('tileerror',()=>{
+    if(next!==placementTileLayer||failed)return;
+    failed=true;
+    error('Plasseringsgevinst kunne ikke tegnes. Last siden på nytt hvis kartdataene er endret.');
+  });
+  next.on('load',()=>{
+    if(next!==placementTileLayer)return;
+    if(placementTileLoading!==null){finishLoading(placementTileLoading,failed);placementTileLoading=null;}
+  });
+  placementTileLayer=next;overlay=next;next.addTo(map);
+}
+function showUncertaintyTiles(layerMode,settings){
+  const roads=settings?Object.fromEntries(Object.entries(settings).filter(([key])=>key!=='bounds')):null;
+  const query=new URLSearchParams({revision:String(state.revision),mode:layerMode,dataset:state.dataset});
+  if(roads)query.set('roads',JSON.stringify(roads));
+  const key=query.toString();
+  if(uncertaintyTileKey===key&&uncertaintyTileLayer){repaintMapRaster();return;}
+  overlaySerial++;overlayKey=null;cancelQueuedMapImage();removeUncertaintyTiles();
+  if(overlay){map.removeLayer(overlay);overlay=null;}
+  uncertaintyTileKey=key;
+  const next=createRasterTileLayer(`/api/map/tiles/{z}/{x}/{y}.bin?${key}`,{
+    pane:'overlayPane',opacity:overlayOpacity(),bounds:state.bounds,noWrap:true,maxNativeZoom:12,maxZoom:18,
+    updateWhenIdle:true,keepBuffer:2
+  });
+  let failed=false;
+  next.on('loading',()=>{
+    if(next!==uncertaintyTileLayer)return;
+    failed=false;
+    if(uncertaintyTileLoading===null)uncertaintyTileLoading=beginLoading(
+      layerMode==='reduction'?'Laster ruter for endring i usikkerhet':'Laster usikkerhetsruter');
+  });
+  next.on('tileerror',()=>{
+    if(next!==uncertaintyTileLayer||failed)return;
+    failed=true;
+    error('Kartflisene kunne ikke tegnes. Last siden på nytt hvis scenariet er endret.');
+  });
+  next.on('load',()=>{
+    if(next!==uncertaintyTileLayer)return;
+    if(uncertaintyTileLoading!==null){finishLoading(uncertaintyTileLoading,failed);uncertaintyTileLoading=null;}
+  });
+  uncertaintyTileLayer=next;overlay=next;next.addTo(map);
+}
+function cancelQueuedMapImage(){pendingMapImage=null;}
+function queueMapImage(url,bounds,serial,label,failureMessage,numeric=false){
+  pendingMapImage={url,bounds,serial,label,failureMessage,numeric};
+  if(activeMapImage)return;
+  startQueuedMapImage();
+}
+function startQueuedMapImage(){
+  if(!pendingMapImage)return;
+  const job=pendingMapImage;pendingMapImage=null;
+  const token=beginLoading(job.label);
+  const next=(job.numeric?createRasterOverlay(job.url,job.bounds,{opacity:0,interactive:false}):
+    L.imageOverlay(job.url,job.bounds,{opacity:0,interactive:false})).addTo(map);
+  activeMapImage=next;
+  function finish(failed){
+    const current=job.serial===overlaySerial;
+    finishLoading(token,failed&&current);
+    if(failed||!current){
+      map.removeLayer(next);
+      if(failed&&current){overlayKey=null;error(job.failureMessage);}
+    }else{
+      if(overlay)map.removeLayer(overlay);
+      overlay=next;overlay.setOpacity(overlayOpacity());
+    }
+    activeMapImage=null;
+    startQueuedMapImage();
+  }
+  next.once('load',()=>finish(false));
+  next.once('error',()=>finish(true));
+  if(job.numeric)next.loadRaster();
+}
+
+function usesFixedP95Scale(){
+  return state?.dataset==='temperature:direct_p95'&&state.layers.length===1&&
+    ['uncertainty','baseline'].includes(mode);
+}
+function usesEmptyReferenceLegend(){
+  return mode==='reduction'&&state?.network==='empty'&&['RMSE','P95'].includes(state.metric)&&
+    state.dataset.startsWith('temperature:')&&state.layers.length===1;
+}
+
 function updateMap() {
   if(!state)return;
+  const tileMode=['uncertainty','baseline','reduction'].includes(mode);
+  if(mode!=='placement'||state.layers.length!==1)removePlacementTiles();
+  if(!tileMode)removeUncertaintyTiles();
+  const emptyReference=usesEmptyReferenceLegend();
+  const emptyP95=emptyReference&&state.metric==='P95';
   clearPreview();
   const climate=mode==='climate';
   renderRoadSummary();
   element('climate-legend').hidden=!climate;
   element('ramp').hidden=climate;
-  element('low').parentElement.hidden=climate;
-  element('low').parentElement.style.display=climate?'none':'';
+  element('legend-numbers').hidden=true;
+  element('low').parentElement.hidden=climate||emptyP95;
+  element('low').parentElement.style.display=climate||emptyP95?'none':'';
   if(!state.layers.length&&!climate&&!mode.startsWith('terrain:')){
-    overlaySerial++;overlayKey=null;
+    overlaySerial++;overlayKey=null;cancelQueuedMapImage();
     if(overlay)map.removeLayer(overlay);
     overlay=null;
     element('legend-title').textContent='Ingen værfenomen valgt';
@@ -891,13 +1097,14 @@ function updateMap() {
     element('rmse-filter').hidden=true;document.title='Værnett';
     return;
   }
-  element('rmse-filter').hidden=(state.metric!=='RMSE'&&state.layers.length<2)||climate;
+  element('rmse-filter').hidden=(!['RMSE','P95'].includes(state.metric)&&state.layers.length<2)||climate;
   refreshRmseRange();
   renderUncertaintyCutoff();
   document.querySelectorAll('[data-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.mode===mode)));
   if(climate){updateClimateMap();return;}
   const stationLabel=state.selected_station_label||'Ingen stasjon valgt';
-  const titles={uncertainty:state.weather_label,baseline:state.weather_label,reduction:`${stationLabel}`,affected:`${stationLabel}`};
+  const weatherTitle=usesFixedP95Scale()?DIRECT_P95_LEGEND_TITLE:state.weather_label;
+  const titles={uncertainty:weatherTitle,baseline:weatherTitle,reduction:`Redusert usikkerhet · ${stationLabel}`,affected:stationLabel};
   const baselineChange=state.comparison!=='contribution'&&['reduction','affected'].includes(mode);
   const comparisonTitle={baseline:'Endring fra opprinnelig grunnnett',move:`${stationLabel} · effekt av flytting`,removal:`${stationLabel} · økt usikkerhet ved fjerning`};
   if(baselineChange)titles[mode]=comparisonTitle[state.comparison];
@@ -906,21 +1113,25 @@ function updateMap() {
   if(uncertainty&&state.network==='frost')element('legend-title');
   const terrain=mode.startsWith('terrain:');
   const placement=mode==='placement';
-  const placementLayer=placement?placementCatalogs.get(state.dataset):null;
+  if(emptyReference){
+    element('legend-title').textContent=emptyReductionLegendTitle(state.empty_reference_rmse,state.metric==='P95');
+  }
+  const placementLayer=placement?placementCatalogs.get(JSON.stringify([state.dataset,selectedPlacementNetwork()])):null;
   const terrainLayer=terrain?terrainCatalogs.get(state.cell_m)?.layers.find(layer=>layer.field===mode.split(':')[1]):null;
-  element('terrain-layer').value=terrain?mode.split(':')[1]:'';
+  element('terrain-layer').value=placement?'placement':terrain?mode.split(':')[1]:'';
   element('middle').hidden=!terrainLayer?.field.startsWith('tpi_');
   if(baselineChange){element('middle').hidden=false;element('middle').textContent='0';}
   if(terrain&&!terrainLayer){
-    overlaySerial++;overlay?.setOpacity(0);element('legend-title').textContent='Laster terrenglag…';loadTerrainOptions();return;
+    overlaySerial++;overlayKey=null;cancelQueuedMapImage();overlay?.setOpacity(0);element('legend-title').textContent='Laster terrenglag…';loadTerrainOptions();return;
   }
   if(placement&&!placementLayer){
-    overlaySerial++;overlayKey=null;overlay?.setOpacity(0);element('legend-title').textContent='Laster lagret plasseringsgevinst…';loadPlacementOptions();return;
+    overlaySerial++;overlayKey=null;cancelQueuedMapImage();removePlacementTiles();overlay?.setOpacity(0);element('legend-title').textContent='Laster lagret plasseringsgevinst…';loadPlacementOptions();return;
   }
   element('ramp').style.background=uncertainty?UNCERTAINTY_LEGEND.gradient:mode==='affected'?'#d9007a':'linear-gradient(to right,#ffffd9,#7fcdbb,#225ea8,#081d58)';
   element('low').textContent=UNCERTAINTY_LEGEND.low;
   element('high').textContent=UNCERTAINTY_LEGEND.high;
   if(!uncertainty){element('low').textContent='Mindre forbedring\u00A0\u00A0\u00A0';element('high').textContent='Større forbedring';}
+  if(emptyReference){element('low').textContent='';element('high').textContent='';}
   if(baselineChange){
     element('ramp').style.background='linear-gradient(to right,#053061,#6bacd1,#f7f7f7,#e48065,#67001f)';
     element('low').textContent='Mindre usikkert';
@@ -928,14 +1139,14 @@ function updateMap() {
     element('middle').hidden=true;
   }
   if(terrainLayer){
-    element('legend-title').textContent=`${terrainLayer.label} · ${terrainLayer.unit} · lineær skala`;
+    element('legend-title').textContent=`${terrainLayer.label}`;
     element('ramp').style.background=terrainLayer.gradient;
     element('low').textContent=shortNumber(terrainLayer.minimum);element('high').textContent=shortNumber(terrainLayer.maximum);
     element('domain').textContent=`Norge / ${terrainLayer.label}`;document.title=`Værnett | ${terrainLayer.label}`;
   }else if(placementLayer){
-    element('legend-title').textContent=`Lagret total feilreduksjon · ${placementLayer.weather_label} · ${placementLayer.unit} · 5 000 m · logaritmisk`;
-    element('ramp').style.background='linear-gradient(to right,#ffffcc,#ffeda0,#feb24c,#f03b20,#800026)';
-    element('low').textContent=shortNumber(placementLayer.minimum);element('high').textContent=shortNumber(placementLayer.maximum);
+    element('legend-title').textContent=`Plasseringsgevinst (°C·km²)`;
+    element('ramp').style.background='linear-gradient(to right,#ffffcc,#feec9f,#fed875,#fdb14b,#fc8c3b,#fb4c29,#e2191c,#bb0026,#800026)';
+    element('low').textContent='Mindre gevinst';element('high').textContent='Mer gevinst';
     element('domain').textContent=`Norge / ${placementLayer.weather_label} / Plasseringsgevinst`;
     document.title=`Værnett | ${placementLayer.weather_label} · Plasseringsgevinst`;
   }else{
@@ -950,38 +1161,83 @@ function updateMap() {
     element('domain').textContent=`Norge / ${names}`;document.title=`Værnett | ${names}`;
   }
   committedLegendTitle=element('legend-title').textContent;
-  const roadSettings=getRoadSettings();
-  const corridorQuery=!placement&&roadSettings?.corridor?`&roads=${encodeURIComponent(JSON.stringify(roadSettings))}`:'';
+  refreshLegendNumbers();
+  const roadSettings=getWeatherRoadSettings();
+  if(placement&&!combined){showPlacementTiles(placementLayer,roadSettings);return;}
+  if(tileMode){showUncertaintyTiles(mode,roadSettings);return;}
+  const corridorQuery=roadSettings?.corridor?`&roads=${encodeURIComponent(JSON.stringify(roadSettings))}`:'';
   const kuldehull=getKuldehullSettings();
   const kuldehullQuery=!placement&&!terrain&&kuldehull.only?`&kuldehull=${encodeURIComponent(JSON.stringify(kuldehull))}`:'';
   const size=map.getZoom()<=5?400:map.getZoom()<=7?800:1600;
   const savedFrost=!combined&&!state.station_since&&state.counties===null&&state.network==='frost'&&!state.frost_edits?.length&&['uncertainty','baseline'].includes(mode)&&(mode==='baseline'||!state.stations.length);
-  const rmseQuery=!placement&&!terrain&&rmseMinimum()?`&rmse_min=${rmseMinimum()}`:'';
+  const numeric=uncertainty;
+  const rmseQuery=!numeric&&!terrain&&rmseMinimum()?`&rmse_min=${rmseMinimum()}`:'';
   const layersQuery=`&layers=${encodeURIComponent(state.layers.join(','))}`;
-  const key=JSON.stringify([mode,state.dataset,state.layers,state.combine,state.counties,state.pross_only,placement?5000:state.cell_m,placement?'saved':state.network,placement&&!combined?placementLayer.source:savedFrost?state.frost_ready:state.revision,size,corridorQuery,kuldehullQuery,rmseQuery]);
-  if(overlayKey===key&&overlay)return;
+  const view=map.getBounds();
+  const placementBounds=placement&&placementLayer.cell_m===500?
+    [Math.max(-180,view.getWest()),Math.max(-85,view.getSouth()),Math.min(180,view.getEast()),Math.min(85,view.getNorth())]:null;
+  const key=JSON.stringify([mode,state.dataset,state.layers,state.combine,state.counties,state.pross_only,state.include_met,placement?placementLayer.cell_m:state.cell_m,placement?'saved':state.network,placement&&!combined?placementLayer.source:savedFrost?state.frost_ready:state.revision,size,corridorQuery,kuldehullQuery,rmseQuery,placementBounds]);
+  if(overlayKey===key&&(overlay||activeMapImage||pendingMapImage)){if(numeric)repaintMapRaster();return;}
   overlayKey=key;
   const serial=++overlaySerial;
-  const imageUrl=placement?`/api/placement.png?dataset=${encodeURIComponent(state.dataset)}${layersQuery}&revision=${state.revision}&size=${size}`:`/api/map.png?mode=${mode}&revision=${state.revision}&dataset=${encodeURIComponent(state.dataset)}${layersQuery}&cell_m=${state.cell_m}&size=${size}${corridorQuery}${kuldehullQuery}${rmseQuery}`;
-  const imageBounds=kuldehullQuery?[[kuldehull.bounds[1],kuldehull.bounds[0]],[kuldehull.bounds[3],kuldehull.bounds[2]]]:placement?placementLayer.bounds:state.bounds;
-  const loadingToken=beginLoading('Laster værkart');
-  const next=L.imageOverlay(imageUrl,imageBounds,{opacity:0,interactive:false}).addTo(map);
-  next.once('load',()=>{
-    finishLoading(loadingToken);
-    if(serial!==overlaySerial){map.removeLayer(next);return;}
-    if(overlay)map.removeLayer(overlay);
-    overlay=next;overlay.setOpacity(overlayOpacity());
-  });
-  next.once('error',()=>{finishLoading(loadingToken,true);map.removeLayer(next);if(serial===overlaySerial){overlayKey=null;error('Kartlaget kunne ikke tegnes. Stasjonsscenariet er uendret.');}});
+  const placementQuery=placementBounds?`&bounds=${encodeURIComponent(JSON.stringify(placementBounds))}`:'';
+  const imageUrl=placement?`/api/placement.png?dataset=${encodeURIComponent(state.dataset)}${layersQuery}&revision=${state.revision}&size=${size}${placementQuery}${corridorQuery}${rmseQuery}`:`/api/map.${numeric?'bin':'png'}?mode=${mode}&revision=${state.revision}&dataset=${encodeURIComponent(state.dataset)}${layersQuery}&cell_m=${state.cell_m}&size=${size}${corridorQuery}${kuldehullQuery}${rmseQuery}`;
+  const imageBounds=kuldehullQuery?[[kuldehull.bounds[1],kuldehull.bounds[0]],[kuldehull.bounds[3],kuldehull.bounds[2]]]:placementBounds?[[placementBounds[1],placementBounds[0]],[placementBounds[3],placementBounds[2]]]:placement?placementLayer.bounds:state.bounds;
+  queueMapImage(imageUrl,imageBounds,serial,'Laster værkart','Kartlaget kunne ikke tegnes. Stasjonsscenariet er uendret.',numeric);
 }
 
+let legendNumbersKey=null,legendNumbersSerial=0,legendNumbersReady=false;
+async function refreshLegendNumbers(){
+  const row=element('legend-numbers');
+  if(!state||element('ramp').hidden){
+    row.hidden=true;legendNumbersKey=null;legendNumbersSerial++;return;
+  }
+  const changeLegend=mode==='reduction';
+  const placementLegend=mode==='placement';
+  const signedChange=changeLegend&&state.comparison!=='contribution';
+  const emptyReference=usesEmptyReferenceLegend();
+  const emptyP95=emptyReference&&state.metric==='P95';
+  const count=placementLegend?3:changeLegend?(signedChange?3:2):5;
+  const key=JSON.stringify([count,mode,state.revision,state.network,state.comparison,state.dataset,state.layers,state.combine,state.cell_m,
+    state.color_min,state.color_max,state.reduction_max]);
+  if(key===legendNumbersKey){row.hidden=!legendNumbersReady;return;}
+  legendNumbersKey=key;legendNumbersReady=false;row.hidden=true;
+  const serial=++legendNumbersSerial,revision=state.revision,requestedMode=mode;
+  try{
+    const response=await fetch(`/api/legend?mode=${encodeURIComponent(mode)}&count=${count}`),result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Fargeskalaens verdier kunne ikke lastes');
+    if(serial!==legendNumbersSerial||mode!==requestedMode||state.revision!==revision||
+        element('ramp').hidden)return;
+    if(result.revision!==revision)throw new Error('Fargeskalaen er endret. Oppdater kartet.');
+    row.replaceChildren();
+    const values=emptyP95?[state.empty_reference_rmse,0]:result.values;
+    values.forEach((value,index)=>{
+      const label=document.createElement('span');
+      const prefix=emptyP95?(index===0?'≥':''):placementLegend?'':changeLegend?
+        (index===0&&signedChange?'\u2264':index===result.values.length-1&&!emptyReference?'\u2265':''):
+        (index===0&&!result.fixed?'\u2264':index===result.values.length-1?'\u2265':'');
+      const formatted=placementLegend?number(value,0):Math.abs(value)>=10000||value!==0&&Math.abs(value)<.001?
+        value.toExponential(1).replace('.',',').replace('e+','e'):shortNumber(value);
+      const sign=signedChange&&value>0?'+':'';
+      label.textContent=prefix+sign+formatted+(changeLegend&&!emptyP95?` ${result.unit}`:'');
+      label.style.left=`${index/(values.length-1)*100}%`;row.append(label);
+    });
+    row.setAttribute('aria-label',`Fargeskala (${result.unit})`);
+    legendNumbersReady=values.length>0;row.hidden=!legendNumbersReady;
+  }catch(failure){
+    if(serial===legendNumbersSerial){legendNumbersKey=null;error(failure.message);}
+  }
+}
 function selectStation(kind,index){requestState({action:'select',kind,index});}
 async function chooseFrostStation(station,latlng){
-  await requestState({action:'select',kind:'frost',station_id:station.station_id});
+  const proposal=sensorProposal(station);
+  const activeProposal=proposal?.sensors.some(sensor=>state.layers.some(dataset=>dataset.startsWith(`${sensor}:`)));
+  await requestState(activeProposal?{action:'select',kind:'manual',index:proposal.id}:
+    {action:'select',kind:'frost',station_id:station.station_id});
   const current=state?.fixed_stations.find(item=>item.station_id===station.station_id)||station;
   openStationPopup(latlng,current);
 }
-const SENSORS={temperature:['Temperatur','#d7301f'],wind:['Vind','#1f78b4'],precipitation:['Nedbør','#33a02c'],snow:['Snødybde','#8c6bb1'],humidity:['Luftfuktighet','#ff7f00'],road_temperature:['Vegbanetemperatur','#6b4226']};
+const SENSORS={temperature:['Temperatur','#d7301f'],wind:['Vind','#33a02c'],snow:['Snødybde','#6b4226'], precipitation:['Nedbør','#1f78b4'],humidity:['Luftfuktighet','#ff7f00'],road_temperature:['Vegbanetemperatur','#8c6bb1']};
 function sensorProposal(station){
   if(station.kind!=='observation'||station.removed)return null;
   return state.stations.find(proposal=>Math.abs(proposal.lon-station.lon)<1e-9&&Math.abs(proposal.lat-station.lat)<1e-9&&
@@ -1002,7 +1258,7 @@ async function openManualStation(station,index){
   const current=state.stations.find(item=>item.id===station.id);
   if(!current)return;
   openStationPopup(L.latLng(current.lat,current.lon),{...current,kind:'manual',
-    station_id:`Ny stasjon ${index+1}`,name:`${number(current.elevation,0)} m`,
+    station_id:`Nytt målepunkt ${index+1}`,
     layers:(current.sensors||[]).filter(sensor=>state.layers.some(dataset=>dataset.startsWith(`${sensor}:`)))});
 }
 function openStationPopup(latlng,station,selectionKind,selectionIndex){
@@ -1017,13 +1273,6 @@ function openStationPopup(latlng,station,selectionKind,selectionIndex){
     item.append(sensorDot(sensor),SENSORS[sensor]?.[0]||sensor);
     if(addedSensors.includes(sensor)){item.className='sensor-added';const added=document.createElement('small');added.textContent='Lagt til';item.append(added);}
     if((station.layers||[]).includes(sensor)){const used=document.createElement('small');item.append(used);}
-    if(!station.removed&&(station.kind==='manual'||station.kind==='observation')){
-      const remove=document.createElement('button');remove.type='button';remove.textContent='Fjern sensor';
-      remove.setAttribute('aria-label',`Fjern sensor: ${SENSORS[sensor]?.[0]||sensor}`);
-      remove.onclick=()=>{map.closePopup();requestState({action:'remove_sensor',sensor,
-        ...(station.kind==='manual'?{id:station.id}:{station_id:station.station_id})});};
-      item.append(remove);
-    }
     list.append(item);
   }
   if(!list.children.length){const item=document.createElement('li');item.textContent='Ingen kjente sensorer';list.append(item);}
@@ -1038,7 +1287,9 @@ function openStationPopup(latlng,station,selectionKind,selectionIndex){
     const actions=document.createElement('div');actions.className='popup-actions';
     const edit=document.createElement('button');edit.type='button';edit.textContent='Endre sensorer';
     edit.onclick=()=>promptNewStation(latlng,station);
-    actions.append(edit);box.append(actions);
+    const remove=document.createElement('button');remove.type='button';remove.textContent='Fjern målepunkt';
+    remove.onclick=()=>{map.closePopup();requestState({action:'remove',id:station.id});};
+    actions.append(edit,remove);box.append(actions);
   }
   if(station.svv!==undefined){
     const owners=document.createElement('div');
@@ -1060,34 +1311,22 @@ function openStationPopup(latlng,station,selectionKind,selectionIndex){
     if(station.removed){
       const note=document.createElement('small');note.textContent='Fjernet fra scenariet';actions.append(note);
     }else{
-      const hint=document.createElement('small');hint.textContent=element('station-move-mode').checked?
-        'Dra markøren for å flytte hele stasjonen med alle sensorer':
-        'Slå på Flyttemodus for å flytte stasjonen';
-      const remove=document.createElement('button');remove.type='button';remove.textContent='Fjern stasjon';
-      remove.onclick=()=>{map.closePopup();requestState({action:'remove_frost',station_id:station.station_id});};
-      const addSensor=document.createElement('button');addSensor.type='button';addSensor.textContent='Legg til sensor';
-      addSensor.disabled=!(state.layer_options||[]).some(option=>option.available&&!(station.sensors||[]).includes(option.phenomenon));
-      addSensor.onclick=()=>promptStationSensor(latlng,station);
-      actions.append(hint,remove,addSensor);
-    }
-    function promptStationSensor(latlng,station){
-      const form=document.createElement('form');form.className='add-popup';
-      const title=document.createElement('strong');title.textContent='Legg til sensor · eget forslag';form.append(title);
-      for(const option of state.layer_options.filter(option=>option.available&&!(station.sensors||[]).includes(option.phenomenon))){
-        const label=document.createElement('label'),input=document.createElement('input');
-        input.type='checkbox';input.value=option.phenomenon;input.checked=state.layers.includes(option.dataset);
-        label.append(input,sensorDot(option.phenomenon),SENSORS[option.phenomenon][0]);form.append(label);
+      if(!(station.sensors||[]).includes('temperature')){
+        const addTemperature=document.createElement('button');addTemperature.type='button';addTemperature.textContent='Legg til temperatursensor';
+        addTemperature.onclick=()=>{map.closePopup();requestState({action:'add_sensor',station_id:station.station_id,sensors:['temperature']});};
+        actions.append(addTemperature);
+      }else if(addedSensors.includes('temperature')){
+        const removeTemperature=document.createElement('button');removeTemperature.type='button';removeTemperature.textContent='Fjern temperatursensor';
+        removeTemperature.onclick=()=>{map.closePopup();requestState({action:'remove_sensor',station_id:station.station_id,sensor:'temperature'});};
+        actions.append(removeTemperature);
       }
-      const actions=document.createElement('div');actions.className='popup-actions';
-      const cancel=document.createElement('button');cancel.type='button';cancel.textContent='Avbryt';cancel.onclick=()=>map.closePopup();
-      const confirm=document.createElement('button');confirm.type='submit';confirm.textContent='Legg til sensor';actions.append(cancel,confirm);form.append(actions);
-      form.onsubmit=event=>{
-        event.preventDefault();
-        const sensors=[...form.querySelectorAll('input:checked')].map(input=>input.value);
-        if(!sensors.length){error('Velg minst én sensor');return;}
-        map.closePopup();requestState({action:'add_sensor',station_id:station.station_id,sensors});
-      };
-      L.popup({closeOnClick:false,autoPan:true}).setLatLng(latlng).setContent(form).openOn(map);
+      // const hint=document.createElement('small');hint.textContent=element('station-move-mode').checked?
+      //   'Dra markøren for å flytte hele stasjonen med alle sensorer':
+      //   'Slå på Flyttemodus for å flytte stasjonen';
+      const remove=document.createElement('button');remove.type='button';remove.textContent='Fjern målepunkt';
+      remove.onclick=()=>{map.closePopup();requestState({action:'remove_frost',station_id:station.station_id});};
+      actions.append(remove);
+      // actions.append(hint,remove);
     }
     if(station.removed||station.original_position||station.sensors_changed){
       const restore=document.createElement('button');restore.type='button';restore.textContent='Gjenopprett stasjon';
@@ -1099,10 +1338,10 @@ function openStationPopup(latlng,station,selectionKind,selectionIndex){
   L.popup({autoPan:true}).setLatLng(latlng).setContent(box).openOn(map);
 }
 function promptNewStation(latlng,station=null){
-  const options=(state?.layer_options||[]).filter(option=>option.available);
+  const options=state?.layer_options||[];
   if(!options.length){if(!station)requestState({action:'add',lat:latlng.lat,lon:latlng.lng});return;}
   const form=document.createElement('form');form.className='add-popup';
-  const title=document.createElement('strong');title.textContent=station?'Endre sensorer':'Ny stasjon · velg sensorer';form.append(title);
+  const title=document.createElement('strong');title.textContent=station?'Endre sensorer':'Nytt målepunkt · velg sensorer';form.append(title);
   for(const option of options){
     const label=document.createElement('label'),input=document.createElement('input');
     input.type='checkbox';input.value=option.phenomenon;input.checked=station?(station.sensors||[]).includes(option.phenomenon):state.layers.includes(option.dataset);
@@ -1120,28 +1359,34 @@ function promptNewStation(latlng,station=null){
   };
   L.popup({closeOnClick:false,autoPan:true}).setLatLng(latlng).setContent(form).openOn(map);
 }
-document.querySelectorAll('[data-comparison]').forEach(button=>{
-  button.onclick=()=>requestState({action:'comparison',value:button.dataset.comparison});
-  button.onkeydown=event=>{
-    if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
-    event.preventDefault();
-    const value=event.key==='Home'?'baseline':event.key==='End'?'selected':button.dataset.comparison==='baseline'?'selected':'baseline';
-    element(`comparison-${value}`).focus();requestState({action:'comparison',value});
-  };
+element('comparison-baseline').onclick=()=>requestState({
+  action:'comparison',value:state.comparison_scope==='baseline'?'selected':'baseline'
 });
-element('selected-station').onchange=()=>{const [kind,index]=element('selected-station').value.split(':');if(kind==='frost')requestState({action:'select',kind,station_id:index});else if(kind)selectStation(kind,Number(index));};
 element('map').addEventListener('mouseleave',clearPreview);
 map.on('dragstart zoomstart',clearPreview);
-map.on('click',event=>{
+map.on('click',async event=>{
+  const canAddStation=Date.now()-popupClosedAt>300;
   if(event.originalEvent?.ctrlKey||event.originalEvent?.metaKey)inspectKuldehull(event.latlng);
-  else if(event.originalEvent?.shiftKey)inspectBestStation(event.latlng);
-  else if(element('coverage-show').checked)inspectCoverage(event.latlng);
+  else if(event.originalEvent?.altKey)inspectBestStation(event.latlng);
+  else if(element('coverage-show').checked&&await inspectCoverage(event.latlng))return;
   else if(mode.startsWith('terrain:'))inspectTerrain(event.latlng);
   else if(mode==='climate')inspectClimate(event.latlng);
-  else if(Date.now()-popupClosedAt>300)promptNewStation(event.latlng);
+  else if(canAddStation)promptNewStation(event.latlng);
 });
 let popupClosedAt=0;
 map.on('popupclose',()=>{popupClosedAt=Date.now();});
+element('help-open').onclick=()=>element('help-dialog').showModal();
+element('help-close').onclick=()=>element('help-dialog').close();
+element('help-dialog').onclick=event=>{
+  if(event.target===element('help-dialog'))element('help-dialog').close();
+};
+element('help-dialog').onkeydown=event=>{
+  if(event.key==='Escape'){
+    event.preventDefault();
+    event.stopPropagation();
+    element('help-dialog').close();
+  }
+};
 element('station-visibility').onclick=()=>{
   stationsVisible=!stationsVisible;clearPreview();
   for(const layer of [fixedMarkers,manualMarkers]){if(stationsVisible)layer.addTo(map);else map.removeLayer(layer);}
@@ -1160,7 +1405,7 @@ element('phenomena').addEventListener('change',event=>{
 });
 element('network').onchange=()=>{
   if(state.stations.length&&!window.confirm('Bytte værstasjoner og fjerne alle egne forslag?')){element('network').value=selectedNetwork();return;}
-  requestState({action:'network',value:element('network').value,pross_only:element('network').value==='svv'});
+  requestState({action:'network',value:element('network').value,pross_only:['svv','svv_met'].includes(element('network').value)});
 };
 let stationDatePreview=null,stationDateSerial=0;
 function cancelStationDate(){
@@ -1237,17 +1482,12 @@ fetch('/api/counties').then(async response=>{
   }
   renderCountySelection();
 }).catch(failure=>{element('county-error').textContent=failure.message;});
-element('remove-frost').onclick=()=>{
-  const selected=state?.selected_station;
-  if(selected?.kind==='frost'&&window.confirm(`Fjerne ${state.selected_station_label} fra dette scenariet?`))requestState({action:'remove_frost',station_id:selected.station_id});
-};
-element('restore-frost').onclick=()=>requestState({action:'restore_frost'});
 function resetViewDefaults(){
-  mode='uncertainty';combinedCutoffRange=null;rmseRangeKey=null;overlayKey=null;
-  for(const id of ['road-show','road-corridor','kuldehull-show','kuldehull-only','coverage-show'])element(id).checked=false;
+  mode='uncertainty';cutoffRange=null;rmseRangeKey=null;overlayKey=null;
+  for(const id of ['road-score-4','road-score-5','road-corridor','kuldehull-show','kuldehull-only','coverage-show'])element(id).checked=false;
+  element('road-show').checked=true;
   for(const id of ['road-distance','road-reference','kuldehull-depth','opacity','rmse-min'])element(id).value=element(id).defaultValue;
   element('road-categories').querySelectorAll('input').forEach(input=>input.checked=['E','R','F'].includes(input.value));
-  element('road-classes').querySelectorAll('input').forEach(input=>input.checked=roadOptions?.score_network||/^[0-4]$/.test(input.value));
   element('coverage-classes').querySelectorAll('input').forEach(input=>input.checked=true);
   if(!stationsVisible)element('station-visibility').click();
   document.querySelectorAll('aside details').forEach(details=>details.open=details.id==='station-picker');
@@ -1268,56 +1508,69 @@ element('export').onclick=async event=>{
   const link=element('export');link.setAttribute('aria-disabled','true');
   try{
     const response=await fetch('/api/export.gpkg',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mode,revision:state.revision,rmse_min:rmseMinimum(),roads:getRoadSettings(),kuldehull:getKuldehullSettings()})});
+      body:JSON.stringify({mode,revision:state.revision,rmse_min:rmseMinimum(),roads:getWeatherRoadSettings(),kuldehull:getKuldehullSettings()})});
     if(!response.ok){const result=await response.json();throw new Error(result.error||'GeoPackage kunne ikke eksporteres');}
     const url=URL.createObjectURL(await response.blob()),download=document.createElement('a');
     download.href=url;download.download='usikkerhetskartlag.gpkg';download.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
   }catch(failure){error(failure.message);}finally{controls();}
 };
-let combinedCutoffRange=null;
+let cutoffRange=null;
+const cutoffNumber=new Intl.NumberFormat('nb-NO',{maximumFractionDigits:3});
 function rmseMinimum(){
-  const value=Number(element('rmse-min').value);
-  if(state?.layers.length>1){
-    return value&&combinedCutoffRange?combinedCutoffRange.minimum+value*(combinedCutoffRange.maximum-combinedCutoffRange.minimum):0;
-  }
-  return state?.metric==='RMSE'?value:0;
+  if(mode==='reduction'||mode==='climate'||mode.startsWith('terrain:'))return 0;
+  const percentile=Number(element('rmse-min').value);
+  return percentile&&cutoffRange?.cells?Math.max(Number.MIN_VALUE,cutoffRange.cutoffs[percentile]):0;
 }
 function renderUncertaintyCutoff(){
   const value=rmseMinimum(),swatch=element('rmse-min-value');
   swatch.textContent='';
-  swatch.style.background=value?(state.layers.length>1?uncertaintyScaleColour(Number(element('rmse-min').value)):roadErrorColour(value)):'black';
-  const label=value?'Farger under denne fargen skjules':'Av - alle farger vises';
-  swatch.title=label;swatch.setAttribute('aria-label',label);
+  const percentile=Number(element('rmse-min').value),combined=state.layers.length>1;
+  const unit=combined?'':mode==='placement'?' °C·km²':` ${state.unit||'°C'}`;
+  const cut=value?cutoffRange.cutoffs[percentile]:0;
+  const label=mode==='reduction'?'Ikke tilgjengelig for Endring i usikkerhet':value?
+    `${cutoffNumber.format(cut)}${unit} · ${number(cutoffRange.visible_percent[percentile],1)} % av rutene vises`:'Av – alle farger vises';
+  swatch.style.background=value&&!combined&&mode!=='placement'?roadErrorColour(cut):'transparent';
+  element('rmse-cutoff-text').textContent=label;
+  //swatch.title=label;swatch.setAttribute('aria-label',label);
   element('rmse-min').setAttribute('aria-valuetext',label);
 }
 let rmseRangeKey=null,rmseRangeSerial=0;
 async function refreshRmseRange(){
   const slider=element('rmse-min');
-  if((state.metric!=='RMSE'&&state.layers.length<2)||mode.startsWith('terrain:')||mode==='climate'||mode==='placement'){slider.disabled=true;rmseRangeKey=null;rmseRangeSerial++;return;}
-  const settings=getRoadSettings(),rangeMode=mode==='baseline'?'baseline':'uncertainty';
+  if((!['RMSE','P95'].includes(state.metric)&&state.layers.length<2)||mode.startsWith('terrain:')||mode==='climate'||mode==='reduction'){
+    slider.disabled=true;cutoffRange=null;rmseRangeKey=null;rmseRangeSerial++;return;
+  }
+  const settings=getWeatherRoadSettings(),rangeMode=mode;
+  const placement=mode==='placement',combined=state.layers.length>1;
+  if(placement&&!placementCatalogs.get(JSON.stringify([state.dataset,selectedPlacementNetwork()]))){
+    slider.disabled=true;cutoffRange=null;rmseRangeKey=null;rmseRangeSerial++;return;
+  }
   const key=JSON.stringify([state.dataset,state.layers,state.combine,state.cell_m,state.revision,rangeMode,settings]);
   if(key===rmseRangeKey)return;
-  rmseRangeKey=key;slider.disabled=true;
+  rmseRangeKey=key;slider.disabled=true;cutoffRange=null;
   const serial=++rmseRangeSerial;
   try{
-    const combined=state.layers.length>1;
     const response=await (combined?fetch(`/api/combined-range?mode=${rangeMode}`):fetch('/api/rmse-range',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:rangeMode,roads:settings})}));
     const result=await response.json();
-    if(!response.ok)throw new Error(result.error||'RMSE-grensen kunne ikke lastes');
+    if(!response.ok)throw new Error(result.error||'Filtergrensen kunne ikke lastes');
     if(serial!==rmseRangeSerial)return;
-    const previous=Number(slider.value);
-    const previousRange=combinedCutoffRange;
-    combinedCutoffRange=combined?result:null;
-    slider.step='any';slider.max=combined?'1':String(Math.max(0,result.maximum));slider.value=String(Math.min(previous,Number(slider.max)));
-    slider.disabled=result.maximum<=0;
+    cutoffRange=result;
+    slider.disabled=!result.cells;
     renderUncertaintyCutoff();
-    if(previous!==Number(slider.value)||(previous>0&&combined&&JSON.stringify(previousRange)!==JSON.stringify(result)))updateMap();
+    if(rmseMinimum()){repaintMapRaster();updateMap();}
   }catch(failure){if(serial===rmseRangeSerial){rmseRangeKey=null;error(failure.message);}}
 }
 let rmseTimer=null;
 element('rmse-min').oninput=()=>{
   renderUncertaintyCutoff();
-  clearPreview();clearTimeout(rmseTimer);rmseTimer=setTimeout(updateMap,150);
+  clearPreview();clearTimeout(rmseTimer);
+  if(mode==='placement'&&state.layers.length===1&&placementTileLayer||
+      ['uncertainty','baseline'].includes(mode)&&(uncertaintyTileLayer||overlay?.rasterCanvas||
+        activeMapImage?.rasterCanvas||pendingMapImage?.numeric)){
+    repaintMapRaster();return;
+  }
+  overlaySerial++;overlayKey=null;cancelQueuedMapImage();
+  rmseTimer=setTimeout(updateMap,150);
 };
 document.querySelectorAll('[data-mode]').forEach(button=>button.onclick=()=>{mode=button.dataset.mode;updateMap();});
 document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='z'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){event.preventDefault();requestState({action:'undo'});}});
@@ -1362,14 +1615,29 @@ element('coverage-show').onchange=scheduleCoverage;
 initializeCoverage();
 requestState().then(()=>{if(state)map.fitBounds(state.bounds,{padding:[8,8]});});
 
+function selectedRoadScoreClasses(){
+  return roadOptions?.score_network?['4','5'].filter(code=>
+    roadOptions.classes.includes(code)&&element(`road-score-${code}`).checked):[];
+}
+
 function getRoadSettings(includeHidden=false){
-  if(!roadOptions?.available||!includeHidden&&!element('road-show').checked)return null;
+  const classes=selectedRoadScoreClasses();
+  if(!roadOptions?.available||!includeHidden&&!classes.length)return null;
   const bounds=map.getBounds();
   return {bounds:[Math.max(-180,bounds.getWest()),Math.max(-85,bounds.getSouth()),Math.min(180,bounds.getEast()),Math.min(85,bounds.getNorth())],
-    categories:Array.from(element('road-categories').querySelectorAll('input:checked')).map(input=>input.value),
-    classes:Array.from(element('road-classes').querySelectorAll('input:checked')).map(input=>input.value),
+    categories:Array.from(element('road-categories').querySelectorAll('input:checked')).map(input=>input.value)
+      .filter(code=>classes.length||['E','R','F'].includes(code)),
+    classes,
     reference:element('road-reference').value.trim(),zoom:map.getZoom(),colour:'score',geometry_only:true,
-    corridor:element('road-corridor').checked,distance_m:Number(element('road-distance').value)};
+    corridor:false};
+}
+
+function getWeatherRoadSettings(includeHidden=false){
+  if(!includeHidden&&!element('road-corridor').checked||!roadOptions?.available)return null;
+  const bounds=map.getBounds();
+  return {bounds:[Math.max(-180,bounds.getWest()),Math.max(-85,bounds.getSouth()),Math.min(180,bounds.getEast()),Math.min(85,bounds.getNorth())],
+    categories:roadOptions.categories.map(item=>item.code),classes:roadOptions.classes,
+    reference:'',corridor:true,distance_m:Number(element('road-distance').value)};
 }
 
 function displayColourLimits(){
@@ -1378,6 +1646,7 @@ function displayColourLimits(){
 
 function roadErrorColour(value){
   if(value===null||!Number.isFinite(value)||!state)return '#7b8480';
+  if(usesFixedP95Scale())return uncertaintyScaleColour(value<=1?value/2:.5+(value-1)/4);
   const [minimum,maximum]=displayColourLimits();
   return uncertaintyScaleColour(Math.log(Math.max(value,minimum)/minimum)/Math.log(maximum/minimum));
 }
@@ -1390,7 +1659,14 @@ function uncertaintyScaleColour(position){
   return `rgb(${color.join(',')})`;
 }
 
-const ROAD_SCORE_COLOURS=['#00bcd4','#ffe119','#f58231','#e6007e','#252525'];
+function placementScaleColour(position,combined){
+  const stops=combined?[[255,255,217],[236,247,177],[198,232,180],[126,204,187],[64,181,195],[29,144,191],[34,93,167],[36,51,146],[8,29,88]]:
+    [[255,255,204],[254,236,159],[254,216,117],[253,177,75],[252,140,59],[251,76,41],[226,25,28],[187,0,38],[128,0,38]];
+  const scaled=Math.max(0,Math.min(1,position))*(stops.length-1);
+  const left=Math.min(stops.length-2,Math.floor(scaled)),fraction=scaled-left;
+  return `rgb(${stops[left].map((channel,index)=>Math.round(channel+(stops[left+1][index]-channel)*fraction)).join(',')})`;
+}
+
 function roadStyle(feature){
   const scoreClass=Number(feature.properties.VS_Total_klasse);
   return {color:ROAD_SCORE_COLOURS[scoreClass-1]||'#7b8480',
@@ -1401,12 +1677,32 @@ function roadStyle(feature){
 function scheduleRoads(){
   clearTimeout(roadTimer);
   roadSerial++;
-  if(!element('road-show').checked){roadPending=false;roadController?.abort();roadLines.clearLayers();roadCasing.clearLayers();roadResult=null;roadRequestKey=null;renderRoadSummary();return;}
+  updateBackgroundRoads();
+  if(!selectedRoadScoreClasses().length){roadPending=false;roadController?.abort();roadLines.clearLayers();roadCasing.clearLayers();roadResult=null;roadRequestKey=null;renderRoadSummary();return;}
   if(roadOptions)roadTimer=setTimeout(refreshRoads,450);
 }
 
+function updateBackgroundRoads(){
+  const scores=selectedRoadScoreClasses().length>0;
+  element('road-categories').querySelectorAll('input').forEach(input=>{
+    input.disabled=!scores&&!['E','R','F'].includes(input.value);
+  });
+  if(!element('road-show').checked){map.removeLayer(backgroundRoads);return;}
+  const categories=roadOptions?.available?
+    [...element('road-categories').querySelectorAll('input:checked')].map(input=>input.value).filter(code=>['E','R','F'].includes(code)):
+    ['E','R','F'];
+  const query=new URLSearchParams({categories:JSON.stringify(categories),reference:element('road-reference').value.trim()});
+  if(state?.counties!==null&&state?.counties!==undefined)query.set('counties',JSON.stringify(state.counties));
+  const key=query.toString();
+  if(key!==backgroundRoadKey){
+    backgroundRoadKey=key;backgroundRoadError=false;
+    backgroundRoads.setUrl(`/api/roads/background/{z}/{x}/{y}.png?${key}`);
+  }
+  if(!map.hasLayer(backgroundRoads))backgroundRoads.addTo(map);
+}
+
 async function refreshRoads(){
-  if(!state||!roadOptions)return;
+  if(!state||!selectedRoadScoreClasses().length)return;
   if(roadBusy){roadPending=true;return;}
   const serial=roadSerial;
   const settings=getRoadSettings();
@@ -1430,29 +1726,11 @@ async function refreshRoads(){
   finally{roadBusy=false;if(roadPending){roadPending=false;refreshRoads();}}
 }
 
-const SHOW_ROAD_RANKING_VS_TOTAL = true;
-
 function renderRoadSummary(){
   const summary=roadResult?.summary;
-  const ranking=element('road-ranking');
-  ranking.replaceChildren();ranking.hidden=mode==='climate'||mode.startsWith('terrain:')||!roadResult?.features.length;
   element('road-download').disabled=!roadResult?.features.length;
   roadStatus(!roadOptions||roadOptions.available?
     (summary?.truncated?'Ikke alle veger kan vises. Zoom inn for å se flere.':''):'Vegnettfilen er ikke tilgjengelig');
-  if(ranking.hidden)return;
-  const rankingValue=feature=>feature.properties.mean_error??feature.properties.VS_Total;
-  const ranked=roadResult.features.filter(feature=>Number.isFinite(rankingValue(feature)))
-    .sort((first,second)=>rankingValue(second)-rankingValue(first)).slice(0,4);
-  for(const feature of ranked){
-    const item=document.createElement('li'),button=document.createElement('button'),name=document.createElement('span'),value=document.createElement('small');
-    name.textContent=`${feature.properties.roadid||'Uten vegnummer'}`;
-    if(SHOW_ROAD_RANKING_VS_TOTAL&&Number.isFinite(feature.properties.VS_Total)){
-      value.textContent+=`VS_Total ${shortNumber(feature.properties.VS_Total)}`;
-    }
-    button.title='Vis veglenken i kartet';button.append(name,value);button.onclick=()=>{
-      clearPreview();const bounds=L.geoJSON(feature).getBounds();map.fitBounds(bounds,{maxZoom:13,padding:[45,45]});showRoadPopup(feature,bounds.getCenter());
-    };item.append(button);ranking.append(item);
-  }
 }
 
 function roadStatus(message=''){
@@ -1464,7 +1742,7 @@ function showRoadPopup(feature,location){
   const properties=feature.properties,popup=document.createElement('div');popup.className='road-popup';
   const title=document.createElement('strong');title.textContent=`${properties.roadid||'Veg uten nummer'}`;
   const values=document.createElement('dl');
-  const rows=[...(roadOptions?.score_network?[['VS_Total',properties.VS_Total],['VS_Total-klasse',properties.VS_Total_klasse]]:[['Vegklasse',properties.roadclass]]),['Vegtype',properties.roadtype],
+  const rows=[...(roadOptions?.score_network?[['Vegscore',properties.VS_Total],['Vegscoreklasse',displayRoadScoreClass(properties.VS_Total_klasse)]]:[['Vegklasse',properties.roadclass]]),['Vegtype',properties.roadtype],
     ['Lenkelengde',`${number(properties.displayed_km,2)} km`]];
   if(properties.istunnel)rows.push(['Tunnel','Ja']);if(properties.isbridge)rows.push(['Bru','Ja']);if(properties.isferry)rows.push(['Ferje','Ja']);
   for(const [name,value]of rows){const key=document.createElement('dt'),text=document.createElement('dd');key.textContent=name;text.textContent=value??'Ukjent';values.append(key,text);}
@@ -1519,34 +1797,39 @@ async function initializeRoads(){
   roadStatus();
   try{
     const response=await fetch('/api/roads/options');if(!response.ok)throw new Error('Vegnettets metadata kunne ikke lastes');roadOptions=await response.json();
-    if(!roadOptions.available){element('road-show').checked=false;renderRoadSummary();return;}
-    element('road-class-label').textContent=roadOptions.score_network?'VS_Total-klasser':'Vegklasse';
-    element('road-categories').replaceChildren();element('road-classes').replaceChildren();
+    for(const code of ['4','5']){
+      const input=element(`road-score-${code}`);
+      input.disabled=!roadOptions.available||!roadOptions.score_network||!roadOptions.classes.includes(code);
+      if(input.disabled)input.checked=false;
+    }
+    if(!roadOptions.available){scheduleRoads();return;}
+    element('road-categories').replaceChildren();
     for(const category of roadOptions.categories){
       const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=category.code;input.checked=['E','R','F'].includes(category.code);input.onchange=changeRoadFilters;
-      label.title=`${number(category.links,0)} lenker i datakilden`;label.append(input,document.createTextNode(`${category.label}`));element('road-categories').append(label);
-    }
-    for(const roadClass of roadOptions.classes){
-      const label=document.createElement('label'),input=document.createElement('input'),swatch=document.createElement('span');
-      input.type='checkbox';input.value=roadClass;input.checked=roadOptions.score_network||/^[0-4]$/.test(roadClass);input.onchange=changeRoadFilters;
-      swatch.className='sensor-dot';swatch.style.background=ROAD_SCORE_COLOURS[Number(roadClass)-1]||'#7b8480';
-      const range=roadOptions.class_ranges?.[roadClass];
-      label.title=`${number(roadOptions.class_counts[roadClass],0)} lenker${range?` · VS_Total ${shortNumber(range[0])}–${shortNumber(range[1])}`:''}`;
-      const name=roadClass==='U'?'Ukjent':`Klasse ${roadClass}${roadOptions.score_network&&roadClass==='1'?' · lavest':roadOptions.score_network&&roadClass==='5'?' · høyest':''}`;
-      label.append(input,swatch,document.createTextNode(name));element('road-classes').append(label);
+      //label.title=`${number(category.links,0)} lenker i datakilden`;
+      label.append(input,document.createTextNode(`${category.label}`));
+      element('road-categories').append(label);
     }
     element('road-show').disabled=false;scheduleRoads();
   }catch(failure){roadStatus(failure.message);}
 }
 
-element('road-show').onchange=async()=>{
-  if(element('road-show').checked&&!roadOptions){
-    if(!roadInitialization)roadInitialization=initializeRoads().finally(()=>{roadInitialization=null;});
-    await roadInitialization;
+element('road-show').onchange=changeRoadFilters;
+for(const id of ['road-score-4','road-score-5'])element(id).onchange=()=>{
+  roadController?.abort();
+  roadLines.clearLayers();roadCasing.clearLayers();roadResult=null;roadRequestKey=null;
+  changeRoadFilters();
+};
+element('road-corridor').onchange=async()=>{
+  if(element('road-corridor').checked){
+    if(!roadOptions){
+      if(!roadInitialization)roadInitialization=initializeRoads().finally(()=>{roadInitialization=null;});
+      await roadInitialization;
+    }
+    if(!roadOptions?.available){element('road-corridor').checked=false;error('Vegnettet er ikke tilgjengelig');}
   }
   changeRoadFilters();
 };
-element('road-corridor').onchange=changeRoadFilters;
 element('road-distance').onchange=changeRoadFilters;
 element('road-reference').onchange=changeRoadFilters;
 element('road-reference').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();event.target.blur();}};
@@ -1570,25 +1853,28 @@ map.on('moveend',()=>{scheduleRoads();scheduleKuldehull();scheduleCoverage();if(
 
 async function loadPlacementOptions(){
   const dataset=state.dataset;
-  if(placementPending.has(dataset))return;
-  placementPending.add(dataset);
+  const key=JSON.stringify([dataset,selectedPlacementNetwork()]);
+  if(placementPending.has(key))return;
+  placementPending.add(key);
   try{
     const response=await fetch('/api/placement');const layer=await response.json();
     if(!response.ok)throw new Error(layer.error||'Plasseringskartet kunne ikke lastes');
-    placementCatalogs.set(layer.dataset,layer);
-    if(state.dataset===layer.dataset&&mode==='placement')updateMap();
-  }catch(failure){if(state.dataset===dataset&&mode==='placement'){error(failure.message);mode='uncertainty';updateMap();}}
-  finally{placementPending.delete(dataset);}
+    const returnedKey=JSON.stringify([layer.dataset,layer.station_network||selectedPlacementNetwork()]);
+    placementCatalogs.set(returnedKey,layer);
+    if(key===JSON.stringify([state.dataset,selectedPlacementNetwork()])&&mode==='placement')updateMap();
+  }catch(failure){if(key===JSON.stringify([state.dataset,selectedPlacementNetwork()])&&mode==='placement'){error(failure.message);mode='uncertainty';updateMap();}}
+  finally{placementPending.delete(key);}
 }
 
 function populateTerrainOptions(){
   if(!state)return;
   const catalog=terrainCatalogs.get(state.cell_m);if(!catalog)return;
   const select=element('terrain-layer');select.replaceChildren();
-  const weather=document.createElement('option');weather.value='';weather.textContent='Værkart';select.append(weather);
-  for(const layer of catalog.layers.filter(layer=>layer.field==='elevation')){const option=document.createElement('option');option.value=layer.field;option.textContent='Høyde over havet';select.append(option);}
+  const weather=document.createElement('option');weather.value='';weather.textContent='Usikkerhetskart';select.append(weather);
+  if(catalog.placement_available&&['temperature:senorge30','temperature:direct_p95'].includes(state.dataset)){const option=document.createElement('option');option.value='placement';option.textContent='Plasseringsgevinst';select.append(option);}
   if(climateCatalog){const option=document.createElement('option');option.value='climate';option.textContent='Vegklimasonekart';select.append(option);}
-  select.value=mode==='climate'?'climate':mode.startsWith('terrain:')?mode.split(':')[1]:'';controls();
+  for(const layer of catalog.layers.filter(layer=>layer.field==='elevation')){const option=document.createElement('option');option.value=layer.field;option.textContent='Høyde over havet';select.append(option);}
+  select.value=mode==='climate'?'climate':mode==='placement'?'placement':mode.startsWith('terrain:')?mode.split(':')[1]:'';controls();
 }
 
 async function loadTerrainOptions(){
@@ -1697,7 +1983,7 @@ fetch('/api/kuldehull/options').then(response=>response.json()).then(options=>{
 }).catch(()=>{element('kuldehull-status').textContent='Kuldehull-laget er utilgjengelig';});
 
 element('terrain-layer').onchange=()=>{
-  const field=element('terrain-layer').value;mode=field==='climate'?'climate':field?`terrain:${field}`:'uncertainty';map.closePopup();updateMap();
+  const field=element('terrain-layer').value;mode=field==='climate'?'climate':field==='placement'?'placement':field?`terrain:${field}`:'uncertainty';map.closePopup();updateMap();
 };
 
 fetch('/api/climate/options').then(async response=>{
@@ -1707,7 +1993,7 @@ fetch('/api/climate/options').then(async response=>{
 }).catch(problem=>error(problem.message));
 
 function updateClimateMap(){
-  if(!climateCatalog)return;
+  if(!climateCatalog){overlaySerial++;overlayKey=null;cancelQueuedMapImage();overlay?.setOpacity(0);return;}
   element('terrain-layer').value='climate';
   element('legend-title').textContent=`Vegklimasoner`;
   committedLegendTitle=element('legend-title').textContent;
@@ -1719,20 +2005,11 @@ function updateClimateMap(){
     row.append(swatch,document.createTextNode(zone.name));legend.append(row);
   }
   const size=map.getZoom()<=5?400:map.getZoom()<=7?800:1600;
-  const roads=getRoadSettings(),query=roads?.corridor?`&roads=${encodeURIComponent(JSON.stringify(roads))}`:'';
+  const roads=getWeatherRoadSettings(),query=roads?.corridor?`&roads=${encodeURIComponent(JSON.stringify(roads))}`:'';
   const key=JSON.stringify(['climate',state.counties,state.cell_m,size,query]);
-  if(overlayKey===key&&overlay)return;
+  if(overlayKey===key&&(overlay||activeMapImage||pendingMapImage))return;
   overlayKey=key;const serial=++overlaySerial;
-  const loadingToken=beginLoading('Laster klimakart');
-  const next=L.imageOverlay(`/api/climate.png?size=${size}${query}`,climateCatalog.bounds,
-    {opacity:0,interactive:false}).addTo(map);
-  next.once('load',()=>{
-    finishLoading(loadingToken);
-    if(serial!==overlaySerial){map.removeLayer(next);return;}
-    if(overlay)map.removeLayer(overlay);
-    overlay=next;overlay.setOpacity(overlayOpacity());
-  });
-  next.once('error',()=>{finishLoading(loadingToken,true);map.removeLayer(next);if(serial===overlaySerial){overlayKey=null;error('Klimasonene kunne ikke tegnes');}});
+  queueMapImage(`/api/climate.png?size=${size}${query}`,climateCatalog.bounds,serial,'Laster klimakart','Klimasonene kunne ikke tegnes');
 }
 
 async function inspectClimate(location){
@@ -1745,7 +2022,7 @@ async function inspectClimate(location){
     const result=await response.json();
     if(!response.ok)throw new Error(result.error||'Klimasonen kunne ikke leses');
     if(serial!==inspectionSerial)return;
-    content.textContent=result.zone?result.zone.name:'Ingen klimasone i denne rastercellen';
+    content.textContent=result.zone?result.zone.name:'Ingen klimasone i denne cellen';
     if(result.zone){
       const details=document.createElement('details'),heading=document.createElement('summary');
       heading.textContent='Gjennomsnittsverdier for sonen';
@@ -1813,21 +2090,25 @@ async function inspectBestStation(location){
     const content=document.createElement('div');content.className='road-popup station-inspection';
     const title=document.createElement('div');title.className='inspection-drag-handle';title.textContent='Beste stasjoner her · dra for å flytte';title.title='Dra boksen dit du ønsker';title.tabIndex=0;
     const name=document.createElement('strong');name.textContent=`1 · ${result.best.label}`;
-    const value=document.createElement('p');value.className='inspection-error';value.textContent=`Forventet feil ${shortNumber(result.best.error)} ${result.unit}`;
+    const interval=result.metric==='P95';
+    const stationValue=error=>`${interval?'±':''}${shortNumber(error)} ${result.unit}`;
+    const comparisonValue=(error,increase)=>`${stationValue(error)} · ${shortNumber(increase)} ${result.unit} ${interval?'høyere avviksgrense':'mer feil'}`;
+    const value=document.createElement('p');value.className='inspection-error';value.textContent=
+      `${interval?'Anslått 95 %-intervall:':'Forventet feil'} ${stationValue(result.best.error)}`;
     const distance=document.createElement('p');distance.textContent=`${shortNumber(result.distance_km)} km unna`;
     content.append(title,name,value,distance);
     if(result.runner_up){
       const runner=document.createElement('div');runner.className='inspection-runner';
       const label=document.createElement('small');label.textContent='Nest beste stasjon';
       const station=document.createElement('strong');station.textContent=`2 · ${result.runner_up.label}`;
-      const comparison=document.createElement('p');comparison.textContent=`${shortNumber(result.runner_up.error)} ${result.unit} · ${shortNumber(result.removal_increase)} ${result.unit} mer feil`;
+      const comparison=document.createElement('p');comparison.textContent=comparisonValue(result.runner_up.error,result.removal_increase);
       runner.append(label,station,comparison);content.append(runner);
     }
     if(result.third){
       const third=document.createElement('div');third.className='inspection-runner';
       const label=document.createElement('small');label.textContent='Tredje beste stasjon';
       const station=document.createElement('strong');station.textContent=`3 · ${result.third.label}`;
-      const value=document.createElement('p');value.textContent=`${shortNumber(result.third.error)} ${result.unit} · ${shortNumber(result.third.error-result.best.error)} ${result.unit} mer feil`;
+      const value=document.createElement('p');value.textContent=comparisonValue(result.third.error,result.third.error-result.best.error);
       third.append(label,station,value);content.append(third);
     }
     if(result.tied_count>1){

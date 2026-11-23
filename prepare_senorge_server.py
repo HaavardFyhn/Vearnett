@@ -1,5 +1,5 @@
 """Build an explicit allowlisted server package, without local config or credentials."""
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import argparse
 import json
 import shutil
@@ -15,24 +15,17 @@ from remote_senorge.train_remote import sha256
 ROOT = Path(__file__).resolve().parent
 
 
-def prepare(source: Path, output: Path) -> None:
+def prepare(source: Path, output: Path, target_metric: str = "rmse",
+            archive_dir: Path | None = None) -> None:
     if output.exists() or Path(str(output) + ".zip").exists():
         raise FileExistsError(f"Package already exists: {output}")
+    if target_metric not in ("rmse", "absolute-error-p95"):
+        raise ValueError("Unknown seNorge pair target metric")
     config = json.loads((source / "config.json").read_text())
     grid = gpd.read_file(source / "grid_features.gpkg")
     pairs = np.load(source / "cache" / "pairs.npy", allow_pickle=False)
     if pairs.shape != (config["pairs"], 2):
         raise ValueError("Wrong number of cached pairs")
-    # Refuse export while incomplete; only read atomically completed yearly checkpoints.
-    totals = np.zeros((2, 6, len(pairs)), dtype=float)
-    for year in config["years"]:
-        path = source / "cache" / f"seNorge2018_{year}.npz"
-        with np.load(path, allow_pickle=False) as saved:
-            moments = saved["moments"]
-            if moments.shape != totals.shape:
-                raise ValueError(f"Invalid annual moments: {year}")
-            totals += moments
-    labels, _ = training.regression_labels(totals[0], totals[1])
     plan = training.date_plan(config["years"], config["date_step"], config.get("days_per_month", 0),
                               config.get("temporal_split", "chronological"), config["seed"])
     days = len(plan)
@@ -42,8 +35,30 @@ def prepare(source: Path, output: Path) -> None:
         raise ValueError("Cached moment date plan does not match configuration")
     if config.get("days_per_month", 0) and not plan_path.exists():
         raise ValueError("Random-date moments require a saved date plan")
-    keep = (np.isfinite(labels) & (totals[0, 0] >= max(60, np.ceil(split*.9))) &
-            (totals[1, 0] >= max(20, np.ceil((days-split)*.9))))
+    if target_metric == "rmse":
+        totals = np.zeros((2, 6, len(pairs)), dtype=float)
+        for year in config["years"]:
+            path = source / "cache" / f"seNorge2018_{year}.npz"
+            with np.load(path, allow_pickle=False) as saved:
+                moments = saved["moments"]
+                if moments.shape != totals.shape:
+                    raise ValueError(f"Invalid annual moments: {year}")
+                totals += moments
+        labels, _ = training.regression_labels(totals[0], totals[1])
+        keep = (np.isfinite(labels) & (totals[0, 0] >= max(60, np.ceil(split*.9))) &
+                (totals[1, 0] >= max(20, np.ceil((days-split)*.9))))
+    else:
+        archives = ([Path(item["path"]) for item in config["archives"]]
+                    if archive_dir is None else
+                    [archive_dir / PureWindowsPath(item["path"]).name for item in config["archives"]])
+        missing_archives = [str(path) for path in archives if not path.is_file()]
+        if missing_archives:
+            raise FileNotFoundError("Missing annual seNorge archives: " + ", ".join(missing_archives))
+        label_frame = training.stream_labels(
+            archives, grid, pairs, source / "cache", config["date_step"], plan=plan,
+            target_metric=target_metric)
+        labels = label_frame.target_error.to_numpy()
+        keep = np.isfinite(labels)
     pairs, labels = pairs[keep], labels[keep]
     x = training.pair_features(grid, pairs).to_numpy()
     train, test = training.spatial_split(grid, pairs)
@@ -71,6 +86,7 @@ def prepare(source: Path, output: Path) -> None:
         plan.to_csv(work / "selected_dates.csv", index=False)
         manifest = dict(
             schema=1, dataset_sha256=sha256(work / "training.npz"), features=training.FEATURES,
+            target_metric=target_metric,
             base_feature_count=len(training.PAIR_FEATURES), pairs=len(labels),
             spatial_train=int(train.sum()), spatial_test=int(test.sum()),
             years=config["years"], sampled_days=days, train_days=split, test_days=days-split,
@@ -84,7 +100,10 @@ def prepare(source: Path, output: Path) -> None:
                       if (source / "sampling.json").exists() else None),
             spatial_distance_bins=spatial_distance_bins,
             training_source="seNorge_2018 only; no Frost station pairs or station-based sampling",
-            target=config["target"], lake_semantics=config["lake_semantics"],
+            target=(config["target"] if target_metric == "rmse" else
+                    "Mean of the two directional 95th percentiles of absolute OLS residuals; " +
+                    config.get("temporal_split", "chronological")),
+            lake_semantics=config["lake_semantics"],
             limitations=["Gridded interpolation similarity, not independent station accuracy.",
                          "Basins are terrain depressions, not observed lakes.",
                          "Whole-basin volumes repeat in intersecting cells; not additive national volume.",
@@ -108,27 +127,48 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--archive-dir", type=Path,
+                        help="Directory holding the annual seNorge NetCDFs used for p95 labels")
     parser.add_argument("--prepare-30yr", action="store_true",
                         help="Prepare 1m half-normal pairs and 3600 random monthly dates, then package")
+    parser.add_argument("--target-metric", choices=["rmse", "absolute-error-p95"], default="rmse",
+                        help="Pair label; absolute-error-p95 changes only the 30-year seNorge target")
     args = parser.parse_args()
     if args.source is None:
         args.source = training.WORK / ("senorge_grid_pairs_1m_1996_2025_random" if args.prepare_30yr
                                        else "senorge_grid_pairs_1m_basins")
     if args.output is None:
-        args.output = training.WORK / ("senorge_server_package_1996_2025" if args.prepare_30yr
-                                       else "senorge_server_package")
+        suffix = "_p95" if args.target_metric == "absolute-error-p95" else ""
+        args.output = training.WORK / (
+            ("senorge_server_package_1996_2025" + suffix) if args.prepare_30yr
+            else "senorge_server_package" + suffix)
     if args.output.with_suffix(".zip").exists():
         raise FileExistsError("Package ZIP already exists; choose a new --output")
     if args.prepare_30yr:
-        training.main([
+        preparation_args = [
             "--output-dir", str(args.source), "--pairs", "1000000", "--prepare-only",
-            "--archive-dir", str(training.WORK / "senorge_norway_1996_2025" / "netcdf"),
-            "--reuse-archive-dir", str(training.WORK / "senorge_norway_2021_2025" / "netcdf"),
             "--years", *map(str, range(1996, 2026)), "--days-per-month", "10",
             "--temporal-split", "monthly-random", "--distance-distribution", "half-normal",
             "--distance-scale-m", "25000", "--maximum-distance-m", "100000",
-        ])
-    prepare(args.source, args.output)
+        ]
+        if args.archive_dir is None:
+            preparation_args.extend([
+                "--archive-dir", str(training.WORK / "senorge_norway_1996_2025" / "netcdf"),
+                "--reuse-archive-dir", str(training.WORK / "senorge_norway_2021_2025" / "netcdf"),
+            ])
+        else:
+            preparation_args.extend(["--archive-dir", str(args.archive_dir)])
+        training.main(preparation_args)
+    config = json.loads((args.source / "config.json").read_text())
+    if args.target_metric == "absolute-error-p95" and (
+            config["years"] != list(range(1996, 2026)) or
+            config.get("days_per_month") != 10 or
+            config.get("temporal_split") != "monthly-random" or
+            config.get("distance_distribution") != "half-normal" or
+            config.get("distance_scale_m") != 25_000 or
+            config.get("maximum_distance_m") != 100_000):
+        parser.error("The p95 target requires the existing 1996-2025 seNorge30 sample")
+    prepare(args.source, args.output, args.target_metric, archive_dir=args.archive_dir)
 
 
 if __name__ == "__main__":

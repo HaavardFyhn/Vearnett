@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -195,14 +196,18 @@ def update_moments(stats: np.ndarray, x: np.ndarray, y: np.ndarray) -> None:
     stats[5] += xx * yy
 
 
+def ols_coefficients(stats: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    n, sx, sy, sxx, _, sxy = stats
+    safe = np.maximum(n, 1)
+    variance = sxx-sx*sx/safe
+    slope = np.divide(sxy-sx*sy/safe, variance, out=np.zeros_like(n), where=variance > 1e-10)
+    return slope, sy/safe-slope*sx/safe
+
+
 def regression_labels(train: np.ndarray, test: np.ndarray, minimum_train: int = 60,
                       minimum_test: int = 20) -> tuple[np.ndarray, np.ndarray]:
     def direction(t: np.ndarray, v: np.ndarray) -> np.ndarray:
-        n, sx, sy, sxx, syy, sxy = t
-        safe = np.maximum(n, 1)
-        variance = sxx - sx*sx/safe
-        slope = np.divide(sxy-sx*sy/safe, variance, out=np.zeros_like(n), where=variance > 1e-10)
-        intercept = sy/safe - slope*sx/safe
+        slope, intercept = ols_coefficients(t)
         m, vx, vy, vxx, vyy, vxy = v
         squared = vyy + slope*slope*vxx + m*intercept*intercept - 2*slope*vxy - 2*intercept*vy + 2*slope*intercept*vx
         if np.any(squared < -1e-5 * np.maximum(vyy, 1)):
@@ -219,11 +224,124 @@ def regression_labels(train: np.ndarray, test: np.ndarray, minimum_train: int = 
     return np.where(valid, labels, np.nan), np.clip(correlation, -1, 1)
 
 
+def symmetric_percentile_labels(forward_errors: np.ndarray, reverse_errors: np.ndarray,
+                                quantile: float = .95) -> np.ndarray:
+    forward_errors, reverse_errors = np.asarray(forward_errors), np.asarray(reverse_errors)
+    if (forward_errors.ndim != 2 or reverse_errors.shape != forward_errors.shape or
+            not 0 < quantile < 1 or np.isinf(forward_errors).any() or np.isinf(reverse_errors).any() or
+            not np.isfinite(forward_errors).any(axis=0).all() or
+            not np.isfinite(reverse_errors).any(axis=0).all()):
+        raise ValueError("Invalid directional residuals for percentile labels")
+    forward = np.nanquantile(np.abs(forward_errors), quantile, axis=0)
+    reverse = np.nanquantile(np.abs(reverse_errors), quantile, axis=0)
+    return (forward+reverse)/2
+
+
+def array_sha256(values: np.ndarray) -> str:
+    array = np.ascontiguousarray(values)
+    digest = hashlib.sha256()
+    digest.update(str(array.shape).encode())
+    digest.update(array.dtype.str.encode())
+    digest.update(array.view(np.uint8))
+    return digest.hexdigest()
+
+
+def stream_percentile_labels(archives: list[Path], grid: pd.DataFrame, pairs: np.ndarray,
+                             cache: Path, plan: pd.DataFrame, train_stats: np.ndarray,
+                             usable: np.ndarray, variable: str, quantile: float = .95) -> np.ndarray:
+    selected = plan.loc[plan.partition == 1]
+    if selected.empty:
+        raise ValueError("95th-percentile labels require held-out dates")
+    label_cache = cache / "absolute_error_p95_v2"
+    label_cache.mkdir(exist_ok=True)
+    annual_cache = [cache / f"seNorge2018_{int(year)}.npz" for year in sorted(plan.year.unique())]
+    identity = dict(schema=2, variable=variable, quantile=quantile,
+                    pairs_sha256=array_sha256(pairs),
+                    grid_indices_sha256=array_sha256(grid[["nc_row", "nc_col"]].to_numpy()),
+                    plan_sha256=array_sha256(pd.util.hash_pandas_object(
+                        plan[["date", "year", "day_index", "partition"]], index=False).to_numpy()),
+                    archives=[fingerprint(path) for path in archives],
+                    annual_moments=[fingerprint(path) for path in annual_cache])
+    metadata_path = label_cache / "metadata.json"
+    if metadata_path.exists():
+        if json.loads(metadata_path.read_text()) != identity:
+            raise ValueError("95th-percentile label cache inputs changed; use a fresh label cache")
+    else:
+        write_json(metadata_path, identity)
+
+    labels = np.full(len(pairs), np.nan, dtype=np.float64)
+    eligible = np.flatnonzero(usable)
+    rows, cols = grid.nc_row.to_numpy(), grid.nc_col.to_numpy()
+    forward_slope, forward_intercept = ols_coefficients(train_stats)
+    reverse_slope, reverse_intercept = ols_coefficients(train_stats[[0, 2, 1, 4, 3, 5]])
+    pending_chunks = []
+    missing_indices = []
+    for start in range(0, len(eligible), 100_000):
+        indices = eligible[start:start+100_000]
+        stop = start+len(indices)
+        chunk_path = label_cache / f"chunk_{start:07d}_{stop:07d}.npz"
+        if chunk_path.exists():
+            with np.load(chunk_path, allow_pickle=False) as saved:
+                if (not np.array_equal(saved["rows"], indices) or
+                        saved["quantile"].item() != quantile or
+                        saved["target_error"].shape != (len(indices),)):
+                    raise ValueError(f"Invalid cached percentile labels: {chunk_path.name}")
+                chunk_labels = saved["target_error"]
+            if not np.isfinite(chunk_labels).all() or (chunk_labels < 0).any():
+                raise ValueError(f"Invalid cached percentile values: {chunk_path.name}")
+            labels[indices] = chunk_labels
+        else:
+            column_start = sum(len(chunk) for chunk in missing_indices)
+            missing_indices.append(indices)
+            pending_chunks.append((chunk_path, indices, column_start))
+
+    if not missing_indices:
+        return labels
+
+    missing = np.concatenate(missing_indices)
+    forward_errors = np.full((len(selected), len(missing)), np.nan, dtype=np.float32)
+    reverse_errors = np.full_like(forward_errors, np.nan)
+    source_ids, target_ids = pairs[missing].T
+    cursor = 0
+    for path in sorted(archives, key=lambda item: int(item.stem.split("_")[-1])):
+        year = int(path.stem.split("_")[-1])
+        days = selected.loc[selected.year == year, "day_index"].to_numpy()
+        with netCDF4.Dataset(path) as ds:
+            for day in days:
+                slab = np.ma.masked_invalid(ds[variable][day]).filled(np.nan)
+                values = slab[rows, cols]
+                source, target = values[source_ids], values[target_ids]
+                valid = np.isfinite(source) & np.isfinite(target)
+                forward = target-forward_slope[missing]*source-forward_intercept[missing]
+                reverse = source-reverse_slope[missing]*target-reverse_intercept[missing]
+                forward_errors[cursor] = np.where(valid, np.abs(forward), np.nan)
+                reverse_errors[cursor] = np.where(valid, np.abs(reverse), np.nan)
+                cursor += 1
+    if cursor != len(selected):
+        raise ValueError("Held-out residual dates do not match the date plan")
+
+    for chunk_path, indices, column_start in pending_chunks:
+        column_stop = column_start+len(indices)
+        chunk_labels = symmetric_percentile_labels(
+            forward_errors[:, column_start:column_stop],
+            reverse_errors[:, column_start:column_stop], quantile)
+        pending = chunk_path.with_suffix(".pending.npz")
+        np.savez_compressed(pending, rows=indices, quantile=np.array(quantile),
+                            target_error=chunk_labels)
+        pending.replace(chunk_path)
+        labels[indices] = chunk_labels
+        print(f"95th-percentile residual labels: {min(column_stop, len(missing)):,}/{len(missing):,} pairs",
+              flush=True)
+    return labels
+
+
 def stream_labels(archives: list[Path], grid: pd.DataFrame, pairs: np.ndarray, cache: Path,
                   date_step: int = 1, plan: pd.DataFrame | None = None,
-                  variable: str = "tg") -> pd.DataFrame:
+                  variable: str = "tg", target_metric: str = "rmse") -> pd.DataFrame:
     if variable not in ("tg", "tn"):
         raise ValueError("Temperaturvariabel må være tg eller tn")
+    if target_metric not in ("rmse", "absolute-error-p95"):
+        raise ValueError("Ukjent mål for seNorge-par")
     dates = []
     if plan is None:
         plan = date_plan([int(p.stem.split("_")[-1]) for p in archives], date_step)
@@ -298,6 +416,9 @@ def stream_labels(archives: list[Path], grid: pd.DataFrame, pairs: np.ndarray, c
     labels, corr = regression_labels(totals[0], totals[1])
     required_train, required_test = np.ceil(split*.9), np.ceil((len(dates)-split)*.9)
     usable = (totals[0, 0] >= max(60, required_train)) & (totals[1, 0] >= max(20, required_test))
+    if target_metric == "absolute-error-p95":
+        labels = stream_percentile_labels(archives, grid, pairs, cache, plan, totals[0],
+                                          usable, variable)
     return pd.DataFrame(dict(
         target_error=np.where(usable, labels, np.nan), correlation=corr,
         train_overlap=totals[0, 0].astype(int), test_overlap=totals[1, 0].astype(int),

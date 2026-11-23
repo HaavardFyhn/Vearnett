@@ -41,12 +41,31 @@ class ScenarioSaveTests(unittest.TestCase):
         scenario = Scenario(SensorEngine())
         payload = export_scenario(scenario)
         for field, value in (("cell_m", float("nan")), ("layers", ["bad"]), ("network", "bad"),
-                             ("threshold", -1), ("counties", ["bad"]), ("removed_sensors", {"SN1": ["snow"]})):
+                             ("threshold", -1), ("counties", ["bad"]), ("removed_sensors", {"SN1": ["snow"]}),
+                             ("include_met", "yes"), ("include_met", True)):
             bad = copy.deepcopy(payload)
             bad[field] = value
             with self.assertRaises(ValueError):
                 restore_scenario(scenario, bad, Counties())
             self.assertEqual(export_scenario(scenario), payload)
+
+    def test_older_scenarios_without_met_flag_restore_original_network(self):
+        scenario = Scenario(SensorEngine())
+        saved = export_scenario(scenario)
+        saved.pop("include_met")
+        restored = restore_scenario(scenario, saved, Counties())
+        self.assertFalse(restored.include_met)
+
+    def test_older_scenarios_cannot_override_fixed_half_degree_reference(self):
+        scenario = Scenario(SensorEngine())
+        saved = export_scenario(scenario)
+        for previous in (None, 5, 1.5):
+            with self.subTest(previous=previous):
+                if previous is not None:
+                    saved["empty_reference_rmse"] = previous
+                restored = restore_scenario(scenario, saved, Counties())
+                self.assertEqual(restored.empty_reference_rmse, .5)
+                self.assertNotIn("empty_reference_rmse", export_scenario(restored))
 
     def test_api_roundtrip_and_reject_bad_version_and_cross_origin(self):
         client = create_app(SensorEngine()).test_client()

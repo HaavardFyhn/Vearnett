@@ -124,6 +124,12 @@ class CoverageTests(unittest.TestCase):
             self.assertEqual(selected.station_id.tolist(), ["SN1", "SN2"])
             self.assertEqual(selected.lon.tolist(), [10., 11.])
             self.assertTrue(selected.datasets.str.count(";").eq(5).all())
+            keys = list(profiles)
+            metadata = {key: profiles.pop(key) for key in keys[1:]}
+            (root / "outputs" / "portable_weather.json").write_text(json.dumps(
+                dict(profiles=profiles, station_profiles=metadata)))
+            compact, _ = model_stations(root, catalog)
+            pd.testing.assert_frame_equal(compact, selected)
 
     def test_station_assignment_handles_outside_and_no_road_occurrences(self):
         climate = np.ones((3, 3), dtype=np.uint8)

@@ -35,17 +35,16 @@ def parse_args(argv=None):
 
 
 def create_application(args):
-    from station_app import StationEngine, KuldehullLayer, OUT, PHENOMENON_DATASETS, create_app
+    from station_app import StationEngine, KuldehullLayer, OUT, default_dataset, create_app
 
     print("Loading 1 km terrain, models and saved surfaces ...", flush=True)
     engine = StationEngine(args.surfaces, cell_m=1000, frost_neighbors=0)
     try:
-        engine.warm_weather_maps()
+        initial = default_dataset(engine, args.phenomenon)
+        engine.warm_weather_maps(dataset=initial)
+        engine.warm_placement_maps()
         basins = KuldehullLayer(OUT / "potential_lakes_norway_DTM10_sill20_tiled/potential_lakes.gpkg")
         basins.prepare()
-        initial = PHENOMENON_DATASETS[args.phenomenon]
-        if engine.weather is None or not any(config["id"] == initial for config in engine.weather.available):
-            initial = f"{args.phenomenon}:continuous"
         app = create_app(engine, initial_dataset=initial, kuldehull_layer=basins)
         app.config["SESSION_COOKIE_NAME"] = f"station_lab_hosted_{args.port}"
         return app, engine

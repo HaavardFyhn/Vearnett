@@ -14,6 +14,27 @@ except ImportError:
 
 
 class RemoteTests(unittest.TestCase):
+    def test_multi_target_requires_explicit_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            self.fixture(folder)
+            path = folder / "training.npz"
+            with np.load(path) as saved:
+                data = dict(saved)
+            y = data.pop("y")
+            np.savez(path, **data, **{"y_direct-p95": y + 5, "y_rmse": y})
+            manifest_path = folder / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest.update(targets={"direct-p95": "direct", "rmse": "OLS"},
+                            dataset_sha256=trainer.sha256(path))
+            trainer.write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(ValueError, "Select --target"):
+                trainer.load_data(folder)
+            loaded, selected = trainer.load_data(folder, "direct-p95")
+            np.testing.assert_array_equal(loaded["y"], y + 5)
+            self.assertEqual(selected["target_metric"], "direct-p95")
+            self.assertEqual(selected["target"], "direct")
+
     def test_checkpoint_retries_windows_file_lock_and_remains_atomic(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "progress.json"
@@ -88,6 +109,7 @@ class RemoteTests(unittest.TestCase):
                                       device="cpu", trees=4, boost_rounds=4, jobs=1)
             result = trainer.run(args)
             self.assertEqual(len(result["experiments"]), 2)
+            self.assertEqual(result["target_metric"], "rmse")
             experiment = result["experiments"]["extratrees_with_basins"]
             with np.load(args.output / "extratrees_with_basins_holdout.npz") as held:
                 self.assertAlmostEqual(np.sqrt(np.mean((held["actual"]-held["predicted"])**2)),
@@ -100,6 +122,13 @@ class RemoteTests(unittest.TestCase):
             (args.output / "summary.json").unlink()
             trainer.run(args)
             self.assertEqual(timestamp, receipt.stat().st_mtime_ns)
+            (args.output / "summary.json").unlink()
+            manifest_path = p / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["target_metric"] = "absolute-error-p95"
+            trainer.write_json(manifest_path, manifest)
+            result = trainer.run(args)
+            self.assertEqual(result["target_metric"], "absolute-error-p95")
             (args.output / "summary.json").unlink()
             with (args.output / "extratrees_with_basins_holdout.npz").open("ab") as handle:
                 handle.write(b"changed")

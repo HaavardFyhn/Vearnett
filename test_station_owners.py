@@ -5,13 +5,65 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import pandas as pd
 
-from station_app import Scenario
+from station_app import Scenario, create_app
 from station_owners import OWNER_FILE, load_catalog, owner_counts, refresh
+from station_pross import svv_met_excluded
 from test_station_sensor_proposals import SensorEngine
 
 
 class StationOwnersTests(unittest.TestCase):
+    def test_combined_membership_uses_exact_owner_and_keeps_roads_without_owner_data(self):
+        stations = pd.DataFrame(dict(station_id=["SN1", "SN2", "SN3", "SN4", "SN5"],
+            name=["E6 Road", "Private name", "MET.NO in name", "Unknown", "Fv7 Road"]),
+            index=[10, 20, 30, 40, 50])
+        catalog = dict(stations={"SN2": dict(owners=["OTHER", "MET.NO"]),
+                                 "SN3": dict(owners=["MET"]),
+                                 "SN5": dict(owners=["MET.NO", "MET.NO"])})
+        self.assertEqual(svv_met_excluded(stations, catalog), frozenset([2, 3]))
+        with self.assertRaisesRegex(ValueError, "Stasjonseiere mangler"):
+            svv_met_excluded(stations, None)
+
+    def test_app_combined_network_preserves_other_sensors_and_can_switch_back(self):
+        engine = SensorEngine()
+        catalog = dict(updated="today", stations={"SN2": dict(owners=["MET.NO"])})
+        with patch.object(engine, "station_owner_catalog", return_value=catalog, create=True):
+            client = create_app(engine).test_client()
+            combined = client.post("/api/action", json=dict(action="network", value="svv_met"))
+            self.assertEqual(combined.status_code, 200, combined.json)
+            self.assertTrue(combined.json["include_met"])
+            self.assertTrue(combined.json["pross_only"])
+            self.assertEqual({row["station_id"] for row in combined.json["fixed_stations"]}, {"SN2", "SN3"})
+            snow = next(row for row in combined.json["fixed_stations"] if row["station_id"] == "SN3")
+            self.assertEqual(snow["sensors"], ["snow"])
+            saved = client.get("/api/scenario").json
+            all_stations = client.post("/api/action", json=dict(action="network", value="frost", pross_only=False))
+            self.assertFalse(all_stations.json["include_met"])
+            self.assertEqual({row["station_id"] for row in all_stations.json["fixed_stations"]}, {"SN1", "SN2", "SN3"})
+            restored = client.post("/api/scenario", json=saved)
+            self.assertTrue(restored.json["include_met"])
+            self.assertEqual({row["station_id"] for row in restored.json["fixed_stations"]}, {"SN2", "SN3"})
+
+    def test_missing_owners_rejects_combined_network_without_changing_scenario(self):
+        engine = SensorEngine()
+        with patch.object(engine, "station_owner_catalog", return_value=None, create=True):
+            client = create_app(engine).test_client()
+            before = client.get("/api/scenario").json
+            response = client.post("/api/action", json=dict(action="network", value="svv_met"))
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Stasjonseiere mangler", response.json["error"])
+            self.assertEqual(client.get("/api/scenario").json, before)
+
+    def test_combined_membership_also_filters_metadata_without_a_ready_surface(self):
+        engine = SensorEngine()
+        with patch.object(engine, "station_owner_catalog",
+                          return_value=dict(stations={"SN2": dict(owners=["MET.NO"])}), create=True):
+            scenario = Scenario(engine)
+            scenario.pross_only = scenario.include_met = True
+            stations = engine.weather.profile("temperature:continuous")["stations"]
+            self.assertEqual(scenario.station_mask(stations, False), frozenset([0]))
+
     def test_owner_counts_deduplicate_station_sensors_and_coowners(self):
         counts = owner_counts([
             dict(station_id="SN1", owners=["A", "A", "B"]),

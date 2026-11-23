@@ -53,6 +53,7 @@ def export_scenario(current):
                 selected = dict(kind="greedy", index=selected["index"])
         return dict(cell_m=current.engine.cell_m, dataset=current.dataset, layers=list(current.layers),
             network=current.network, baseline=current.baseline, pross_only=current.pross_only,
+            include_met=current.include_met,
             station_since=current.station_since, counties=current.counties, combine=current.combine,
             threshold=current.threshold, comparison_scope=current.comparison_scope,
             station_edits=edits, removed_sensors={identifier: list(sensors)
@@ -95,6 +96,12 @@ def restore_scenario(current, payload, county_layer):
     if network not in ("frost", "greedy", "empty") or not isinstance(pross, bool):
         raise ValueError("Ugyldig stasjonsnett")
     restored.network, restored.pross_only = network, pross
+    include_met = data.get("include_met", False)
+    if not isinstance(include_met, bool) or include_met and (network != "frost" or not pross):
+        raise ValueError("Ugyldig valg av MET-stasjoner")
+    if include_met and (not hasattr(engine, "station_owner_catalog") or engine.station_owner_catalog() is None):
+        raise ValueError("Stasjonseiere mangler for Vegværstasjoner + MET-stasjoner")
+    restored.include_met = include_met
     restored.station_since = restored.validate_station_date(data.get("station_since"))
     counties = county_layer.selection(data.get("counties"))
     restored.counties = None if counties is None else list(counties)

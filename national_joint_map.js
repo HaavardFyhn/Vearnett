@@ -121,7 +121,8 @@ function setStatus(data){
 async function poll(){try{setStatus(await json('/api/national-joint/status'));}catch(error){el('error').textContent=error.message;}}
 async function prepare(){
   if(running)return;ready=false;sources.clearLayers();detailVersion++;generation++;
-  el('error').textContent='';el('export').setAttribute('aria-disabled','true');el('export').removeAttribute('href');
+  el('error').textContent='';
+  el('export').setAttribute('aria-disabled','true');el('export').removeAttribute('href');
   el('removed-station').disabled=true;el('scenario').disabled=true;removedMarker.clearLayers();
   map.removeLayer(nativeTiles);nativeTileUrl=null;
   stationNetwork.clearLayers();el('station-selection').textContent='Updating station availability for the new prediction.';

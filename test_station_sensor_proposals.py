@@ -41,6 +41,67 @@ class SensorEngine(FakeWeatherEngine):
 
 
 class SensorProposalTests(unittest.TestCase):
+    def test_add_temperature_to_snow_only_station_updates_temperature_surface(self):
+        engine = SensorEngine()
+        client = create_app(engine).test_client()
+        before = client.get("/api/state").json
+        marker = next(item for item in before["fixed_stations"] if item["station_id"] == "SN3")
+        self.assertEqual(marker["sensors"], ["snow"])
+        response = client.post("/api/action", json=dict(
+            action="add_sensor", station_id="SN3", sensors=["temperature"]))
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json["stations"][0]["sensors"], ["temperature"])
+        self.assertLess(response.json["mean_rmse"], before["mean_rmse"])
+        again = client.post("/api/action", json=dict(
+            action="add_sensor", station_id="SN3", sensors=["temperature"]))
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(len(again.json["stations"]), 1)
+        removed = client.post("/api/action", json=dict(
+            action="remove_sensor", station_id="SN3", sensor="temperature"))
+        self.assertEqual(removed.status_code, 200, removed.json)
+        self.assertEqual(removed.json["stations"], [])
+        restored = next(item for item in removed.json["fixed_stations"] if item["station_id"] == "SN3")
+        self.assertEqual(restored["sensors"], ["snow"])
+        self.assertEqual(removed.json["mean_rmse"], before["mean_rmse"])
+
+    def test_removing_added_temperature_preserves_other_proposed_sensors(self):
+        client = create_app(SensorEngine()).test_client()
+        added = client.post("/api/action", json=dict(
+            action="add_sensor", station_id="SN3", sensors=["temperature", "wind"]))
+        self.assertEqual(added.status_code, 200, added.json)
+        removed = client.post("/api/action", json=dict(
+            action="remove_sensor", station_id="SN3", sensor="temperature"))
+        self.assertEqual(removed.status_code, 200, removed.json)
+        self.assertEqual(removed.json["stations"][0]["sensors"], ["wind"])
+        marker = next(item for item in removed.json["fixed_stations"] if item["station_id"] == "SN3")
+        self.assertEqual(marker["sensors"], ["snow"])
+
+    def test_selected_upgrade_compares_only_added_sensor_and_keeps_other_proposals(self):
+        engine = SensorEngine()
+        scenario = Scenario(engine)
+        scenario.apply(dict(action="add_sensor", station_id="SN3", sensors=["temperature"]))
+        upgrade = scenario.attached_proposal("SN3")
+        with patch.object(engine, "snap", return_value=7), \
+                patch.object(engine, "station", return_value=dict(
+                    id=7, x=7000, y=0, lon=13, lat=64, elevation=15)), \
+                patch.object(engine, "prediction", side_effect=lambda index, *args:
+                             np.array([2.5, 2., .25]) if index == 7 else np.array([2., .5, 2.])):
+            scenario.apply(dict(action="add", lon=13, lat=64, sensors=["temperature"]))
+            scenario.apply(dict(action="select", kind="manual", index=upgrade))
+            after, before, change = scenario.change()
+            np.testing.assert_allclose(before, [2.5, 2., .25])
+            np.testing.assert_allclose(after, [2., .5, .25])
+            np.testing.assert_allclose(change, [.5, 1.5, 0.])
+            with scenario.as_dataset("snow:class"):
+                np.testing.assert_array_equal(scenario.change()[2], np.zeros(3))
+                self.assertEqual(scenario.frost_edits, {})
+            scenario.apply(dict(action="remove_sensor", station_id="SN3", sensor="temperature"))
+            np.testing.assert_array_equal(scenario.surface(), before)
+            self.assertEqual(scenario.added, [7])
+            marker = next(item for item in scenario.state()["fixed_stations"] if item["station_id"] == "SN3")
+            self.assertEqual(marker["sensors"], ["snow"])
+            self.assertFalse(marker["removed"])
+
     def test_move_observation_carries_added_sensors_and_preserves_original_data(self):
         engine = SensorEngine()
         scenario = Scenario(engine)

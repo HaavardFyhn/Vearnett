@@ -27,16 +27,74 @@ def copy_input(source, destination):
         shutil.copy2(source, destination)
 
 
+def replaced_road_input(path):
+    parts = Path(path).parts
+    return (len(parts) >= 2 and parts[:2] in (
+        ("data", "ProssExport.gdb"), ("data", "Vegnett_VegScore_full.gpkg"))
+        or len(parts) == 4 and parts[:3] == ("outputs", "station_app_cache", "roads")
+        and parts[3].lower().endswith(".gpkg"))
+
+
+def copy_runtime_inputs(data, destination, excluded=()):
+    excluded = {Path(path) for path in excluded}
+    def exclude_replaced_roads(folder, names):
+        return {name for name in names if name == "__pycache__" or name.lower().endswith(".lock") or
+                (Path(folder) / name).relative_to(data) in excluded or
+                replaced_road_input((Path(folder) / name).relative_to(data))}
+    shutil.copytree(data, destination, dirs_exist_ok=True, ignore=exclude_replaced_roads)
+
+
+def copy_temperature_runtime(data, destination, manifest):
+    import joblib
+    from station_weather import PHENOMENON_DATASETS, station_metadata
+
+    profiles = manifest["profiles"]
+    temperature = PHENOMENON_DATASETS["temperature"]
+    if temperature not in profiles:
+        temperature = "temperature:senorge30"
+    if temperature not in profiles:
+        raise ValueError("Portable temperature profile is missing")
+    retained = {Path(value) for key, value in profiles[temperature].items()
+                if key in ("profile", "svv", "svv_met", "model", "basin_features", "basins")}
+    excluded = {Path(value) for identifier, entry in profiles.items() if identifier != temperature
+                for key, value in entry.items() if key in ("profile", "svv", "svv_met", "model", "basin_features", "basins")
+                and Path(value) not in retained}
+    for identifier in manifest.get("station_profiles", {}):
+        if identifier != temperature:
+            tag = identifier.replace(":", "_")
+            excluded.update(Path("outputs") / "portable" / f"{tag}_{kind}.joblib"
+                            for kind in ("profile", "svv", "model"))
+    copy_runtime_inputs(data, destination, excluded)
+    stations = dict(manifest.get("station_profiles", {}))
+    for identifier, entry in profiles.items():
+        if identifier == temperature or identifier in stations:
+            continue
+        tag = identifier.replace(":", "_")
+        metadata_paths = {}
+        for kind in ("profile", "svv"):
+            relative = Path("outputs") / "portable" / f"{tag}_stations_{kind}.joblib"
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump(station_metadata(joblib.load(data / entry[kind])), target, compress=3)
+            metadata_paths[kind] = relative.as_posix()
+        stations[identifier] = metadata_paths
+    result = dict(manifest, profiles={temperature: profiles[temperature]},
+                  available=[item for item in manifest["available"] if item["id"] == temperature],
+                  station_profiles=stations)
+    (destination / "outputs" / "portable_weather.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result, excluded
+
+
 def prepare_roads(destination, cell_m=1000):
     import pyogrio
-    from station_roads import ROAD_LAYER
+    from station_roads import ROAD_LAYER, RoadNetwork
 
-    relative = Path("data") / "ProssExport.gdb"
-    source = ROOT / relative
+    source = ROOT / "data" / "ProssExport.gdb"
     info = pyogrio.read_info(source, layer=ROAD_LAYER)
     if int(info["features"]) <= 0:
         raise ValueError(f"Required road layer is empty: {ROAD_LAYER}")
     source_hash = None
+    existing = None
     if cell_m == 500:
         import hashlib
         from file_hash import sha256
@@ -53,24 +111,26 @@ def prepare_roads(destination, cell_m=1000):
             if saved.get("indexed_source"):
                 if saved.get("source_sha256") not in (source_hash, legacy_windows_hash) or saved.get("layer") != ROAD_LAYER:
                     raise ValueError("Road inputs changed; rebuild the remote 500 m stage before packaging")
-                indexed = pyogrio.read_info(destination / saved["indexed_source"], layer=ROAD_LAYER)
-                if int(indexed["features"]) != int(info["features"]):
+                existing = destination / saved["indexed_source"]
+                indexed = pyogrio.read_info(existing, layer=ROAD_LAYER)
+                if int(indexed["features"]) != int(saved["features"]):
                     raise ValueError("Incomplete indexed road source in the 500 m stage")
-                return saved
-    copy_input(source, destination / relative)
-    bundled = pyogrio.read_info(destination / relative, layer=ROAD_LAYER)
-    if int(bundled["features"]) != int(info["features"]):
-        raise ValueError(f"Incomplete portable road layer: {ROAD_LAYER}")
-    result = dict(source=relative.as_posix(), layer=ROAD_LAYER, features=int(bundled["features"]))
-    if cell_m == 500:
-        from station_roads import RoadNetwork
-        cache = ROOT / "outputs" / "station_app_cache" / "roads"
-        roads = RoadNetwork(source, cache_dir=cache, portable_cache=True)
-        compact = Path("data") / (ROAD_LAYER + ".gpkg")
+    cache = ((destination if existing is not None else ROOT) / "outputs" / "station_app_cache" / "roads")
+    roads = RoadNetwork(existing if existing is not None else source, cache_dir=cache, portable_cache=cell_m == 500)
+    compact = Path("data") / "Vegnett_VegScore_uten_kommunal.gpkg"
+    if roads.path.resolve() != (destination / compact).resolve():
         copy_input(roads.path, destination / compact)
+    bundled = pyogrio.read_info(destination / compact, layer=ROAD_LAYER)
+    if int(bundled["features"]) != roads.metadata["features"]:
+        raise ValueError(f"Incomplete portable road layer: {ROAD_LAYER}")
+    result = dict(source=compact.as_posix(), indexed_source=compact.as_posix(), layer=ROAD_LAYER,
+                  features=int(bundled["features"]), source_features=int(info["features"]),
+                  excluded_road_categories=["K"])
+    if cell_m == 500:
         for path in cache.glob("*.npz"):
-            copy_input(path, destination / "outputs" / "station_app_cache" / "roads" / path.name)
-        result["indexed_source"] = compact.as_posix()
+            target = destination / "outputs" / "station_app_cache" / "roads" / path.name
+            if path.resolve() != target.resolve():
+                copy_input(path, target)
         result["source_sha256"] = source_hash
     return result
 
@@ -89,16 +149,35 @@ def snapshot(destination, cell_m=1000):
     grid["objtype_code"] = pd.Categorical(grid.objtype, categories=categories).codes
     registry = WeatherRegistry(ROOT, grid, make_cache(grid), categories, cell_m=cell_m)
     available = {config["id"]: config for config in registry.available}
-    manifest = dict(schema=1, cell_m=cell_m, categories=categories.tolist(), available=[], profiles={}, skipped=[])
+    temperature = PHENOMENON_DATASETS["temperature"]
+    if temperature not in available and "temperature:senorge30" in available:
+        temperature = "temperature:senorge30"
+    manifest = dict(schema=1, cell_m=cell_m, categories=categories.tolist(), available=[], profiles={},
+                    station_profiles={}, skipped=[])
     portable = destination / "outputs/portable"
     portable.mkdir(parents=True)
-    for identifier in PHENOMENON_DATASETS.values():
+    for identifier in dict(PHENOMENON_DATASETS, temperature=temperature).values():
         if identifier not in available:
             manifest["skipped"].append(dict(id=identifier, reason="No trained model"))
             print(f"SKIP {identifier}: no trained model", flush=True)
             continue
         print(f"SNAPSHOT {identifier}", flush=True)
         config = available[identifier]
+        tag = identifier.replace(":", "_")
+        if identifier != temperature:
+            try:
+                metadata = registry.station_metadata(identifier)
+            except ValueError as error:
+                manifest["skipped"].append(dict(id=identifier, reason=str(error)))
+                print(f"SKIP {identifier}: {error}", flush=True)
+                continue
+            relative = f"outputs/portable/{tag}_stations.joblib"
+            joblib.dump(metadata, destination / relative, compress=3)
+            manifest["station_profiles"][identifier] = dict(profile=relative, svv=relative)
+            registry.station_profiles.clear()
+            del metadata
+            gc.collect()
+            continue
         try:
             profile = registry.profile(identifier)
             if profile.get("baseline") is None:
@@ -108,19 +187,19 @@ def snapshot(destination, cell_m=1000):
             manifest["skipped"].append(dict(id=identifier, reason=str(error)))
             print(f"SKIP {identifier}: {error}", flush=True)
             continue
-        tag = identifier.replace(":", "_")
         entry = dict(profile=f"outputs/portable/{tag}_profile.joblib",
                      svv=f"outputs/portable/{tag}_svv.joblib", model=f"outputs/portable/{tag}_model.joblib")
         for key, value in (("profile", profile), ("svv", svv)):
             stored = {name: item for name, item in value.items() if name not in ("model", "cache_path")}
             stored["prefix"] = "outputs/portable/" + tag
             joblib.dump(stored, destination / entry[key], compress=3)
-        if profile["kind"] == "senorge30":
+        if profile["kind"] in ("senorge30", "direct_p95"):
             entry.update(model_kind="senorge", model=f"outputs/portable/{tag}.ubj",
                          basin_features="outputs/portable/basin_features.csv.gz",
                          basins="outputs/potential_lakes_norway_DTM10_sill20_tiled/potential_lakes.gpkg")
             prefix = Path(config["prefix"])
-            copy_input(prefix / "xgboost_with_basins.ubj", destination / entry["model"])
+            model_path = prefix / "results" / "direct-p95" if profile["kind"] == "direct_p95" else prefix
+            copy_input(model_path / "xgboost_with_basins.ubj", destination / entry["model"])
             copy_input(prefix / "grid_features.csv.gz", destination / entry["basin_features"])
         else:
             joblib.dump(profile["model"], destination / entry["model"], compress=3)
@@ -132,8 +211,8 @@ def snapshot(destination, cell_m=1000):
         registry.models.clear()
         del profile, svv
         gc.collect()
-    if "temperature:senorge30" not in manifest["profiles"]:
-        raise RuntimeError(f"Prepare the temperature seNorge30 baseline and SVV reference at {cell_m} m before packaging")
+    if temperature not in manifest["profiles"]:
+        raise RuntimeError(f"Prepare the temperature baseline and SVV reference at {cell_m} m before packaging")
     (destination / "outputs/portable_weather.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     for relative in (
         "station_app.html", "station_app.js", f"outputs/norway_grid_{cell_m}m.gpkg", "outputs/norway_polygon.gpkg",
@@ -204,7 +283,7 @@ def main(argv=None):
     work = ROOT / "outputs/portable_build" / args.name
     if args.reuse_executable:
         for name in ("station_app.py", "station_scenario.py", "station_roads.py", "station_weather.py",
-                     "station_weather_maps.py", "station_snapshot.py", "station_owners.py", "station_coverage.py", "file_hash.py", "portable_launcher.py"):
+                     "station_weather_maps.py", "station_placement_tiles.py", "station_snapshot.py", "station_owners.py", "station_coverage.py", "file_hash.py", "portable_launcher.py"):
             previous = work / "sources" / name
             if not previous.is_file() or previous.read_bytes() != (ROOT / name).read_bytes():
                 parser.error(f"{name} changed or has no build record; rebuild without --reuse-executable")
@@ -218,6 +297,8 @@ def main(argv=None):
             raise FileExistsError(f"Build folder already exists: {work}; choose another --name")
         manifest = snapshot(data, cell_m=args.cell_m)
     manifest["roads"] = prepare_roads(data, cell_m=args.cell_m)
+    from station_road_background import ROAD_BACKGROUND
+    copy_input(ROOT / ROAD_BACKGROUND, data / ROAD_BACKGROUND)
     from station_owners import OWNER_FILE, load_catalog
     owners = load_catalog(ROOT, data)
     if owners is None:
@@ -266,7 +347,7 @@ def main(argv=None):
     if not args.reuse_executable:
         subprocess.run(command, cwd=sources, check=True)
     application = work / "dist/Vaernett"
-    shutil.copytree(data, application / "_internal", dirs_exist_ok=True)
+    manifest, excluded_weather = copy_temperature_runtime(data, application / "_internal", manifest)
     copy_input(Path(sysconfig.get_paths()["purelib"]) / "xgboost/lib", application / "_internal/xgboost/lib")
     copy_licenses(application)
 
@@ -283,7 +364,9 @@ def main(argv=None):
     print(f"COMPRESS {archive_path}", flush=True)
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as archive:
         for path in sorted(application.rglob("*")):
-            if path.is_file():
+            relative = path.relative_to(application)
+            if path.is_file() and not (relative.parts[0] == "_internal" and
+                    (replaced_road_input(Path(*relative.parts[1:])) or Path(*relative.parts[1:]) in excluded_weather)):
                 archive.write(path, Path("Vaernett") / path.relative_to(application))
     print(f"READY {archive_path} ({archive_path.stat().st_size / 1024**2:.1f} MiB)", flush=True)
     return 0

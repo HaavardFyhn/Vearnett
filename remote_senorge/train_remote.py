@@ -41,13 +41,22 @@ def write_json(path: Path, value: dict) -> None:
             time.sleep(delay)
 
 
-def load_data(folder: Path) -> tuple[dict, dict]:
+def load_data(folder: Path, target: str | None = None) -> tuple[dict, dict]:
     manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
     path = folder / "training.npz"
     if sha256(path) != manifest["dataset_sha256"]:
         raise ValueError("Dataset SHA256 mismatch; repeat the transfer")
+    targets = manifest.get("targets")
+    if targets is not None:
+        if target not in targets:
+            raise ValueError(f"Select --target from: {', '.join(targets)}")
+        manifest.update(target_metric=target, target=targets[target])
+    elif target is not None:
+        raise ValueError("--target is only supported for multi-target packages")
     with np.load(path, allow_pickle=False) as saved:
-        data = {key: saved[key] for key in saved.files}
+        data = {key: saved[key] for key in saved.files if not key.startswith("y_")}
+        if targets is not None:
+            data["y"] = saved[f"y_{target}"]
     x, y = data["x"], data["y"]
     if (y.ndim != 1 or x.shape != (len(y), len(manifest["features"]))
             or not np.isfinite(x).all() or not np.isfinite(y).all() or np.any(y < 0)):
@@ -92,7 +101,8 @@ def verify_device(model, backend: str, requested: str) -> str:
 
 
 def run(args: argparse.Namespace) -> dict:
-    data, manifest = load_data(args.data)
+    target = getattr(args, "target", None)
+    data, manifest = load_data(args.data, target) if target is not None else load_data(args.data)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if (output / "summary.json").exists():
@@ -108,6 +118,8 @@ def run(args: argparse.Namespace) -> dict:
                   jobs=args.jobs, numpy=np.__version__, sklearn=sklearn.__version__,
                   python=platform.python_version(), xgboost=xgb_provenance,
                   features=manifest["features"], base_feature_count=manifest["base_feature_count"])
+    if target is not None:
+        config["target_metric"] = target
     config_path = output / "run_config.json"
     if config_path.exists() and json.loads(config_path.read_text()) != config:
         raise ValueError("Run settings changed; choose another --output")
@@ -188,7 +200,8 @@ def run(args: argparse.Namespace) -> dict:
                    spatial_train=int(train.sum()), spatial_test=int(test.sum()),
                    experiments=experiments, elapsed_minutes=(time.monotonic()-start)/60,
                    validation="Same fixed spatial holdout for every experiment. No test-set tuning/early stopping.",
-                   limitations=manifest["limitations"])
+                   limitations=manifest["limitations"],
+                   target_metric=manifest.get("target_metric", "rmse"))
     summary["sampling"] = manifest.get("sampling")
     summary["target"] = manifest.get("target")
     write_json(output / "summary.json", summary)
@@ -201,6 +214,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--output", type=Path, default=Path("results"))
+    parser.add_argument("--target", help="Target to train from a multi-target package")
     parser.add_argument("--backends", nargs="+", choices=["extratrees", "xgboost"],
                         default=["extratrees", "xgboost"])
     parser.add_argument("--device", default="cuda:0", choices=["cuda:0", "cuda:1", "cpu"])
