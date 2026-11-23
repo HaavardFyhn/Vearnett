@@ -21,14 +21,15 @@ def open_when_ready(port):
 def smoke_test():
     import json
     import numpy as np
-    from station_app import StationEngine, create_app, OUT
+    from station_app import StationEngine, create_app, default_dataset, OUT
 
     spacing = json.loads((OUT / "portable_weather.json").read_text(encoding="utf-8"))["cell_m"]
     engine = StationEngine(OUT / "unused.npy", cell_m=spacing)
     try:
-        client = create_app(engine, initial_dataset="temperature:senorge30").test_client()
+        client = create_app(engine, initial_dataset=default_dataset(engine, "temperature")).test_client()
         for path in ("/", "/station_app.js", "/api/state", "/api/counties",
-                     "/api/map.png?mode=uncertainty&size=400", "/api/roads/options"):
+                     "/api/map.png?mode=uncertainty&size=400",
+                     "/api/map.bin?mode=uncertainty&size=400", "/api/roads/options"):
             response = client.get(path)
             if response.status_code != 200:
                 raise RuntimeError(f"Smoke test failed: {path}: {response.status_code}")

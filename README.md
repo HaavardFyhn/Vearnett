@@ -3,6 +3,80 @@
 This version replaces correlation similarity with symmetric held-out prediction RMSE. Roads are not included.
 
 ## Temperature workflow
+Værnett uses **direct P95** when the recalculated baselines are available. For example, 2 °C means
+the estimated 95th percentile of the absolute difference in daily mean temperature is 2 °C,
+without correcting the reading from the reference station. This is based on seNorge 1996–2025,
+not observed coverage of a 95% prediction interval.
+The standard Direct P95 uncertainty and baseline maps use a fixed color scale: blue at 0 °C,
+white at 1 °C, and saturated red at 3 °C or above. The original values are still used for filtering and export.
+Below the **Skjul farger under** slider, the app shows the cutoff in map units and the percentage of
+finite grid cells strictly above it (respecting county and road-corridor selection for single layers).
+
+To prepare the staged 500 m app with the existing 10-million-pair model and all four placement maps:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe -u .\prepare_direct_p95.py --data-root .\outputs\portable_build\Remote_500m\data --device cuda --placement-workers 8
+```
+
+Omit `--placement-workers` for baselines only, or use `--device cpu` without CUDA. These are
+resumable national calculations. Restart the app once the Direct P95 baselines are published;
+each placement map becomes available after its separate calculation. The previous RMSE files are
+kept. For **Tomt nett**, the interactive **Endring i usikkerhet** view for Direct P95
+uses a **chosen ±1 °C calculation reference**, not a requirement: add a station to see where its estimated 95% threshold
+is strictly below 1 °C. This is not measured uncertainty without stations. The precomputed
+**Plasseringsgevinst** map uses the reference recorded in its result file (1 °C
+for the updated empty-network run). The legacy RMSE view
+retains its 0.5 °C reference.
+
+For a non-staged 1 km launch, prepare the project cache with
+`python precompute_frost.py --phenomenon temperature --kind direct_p95 --cell-m 1000 --station-network both`.
+
+To run the four Direct P95 placement maps in one pass on the existing SSH machine, build the bundle:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe .\prepare_placement_remote.py --direct-p95-stage .\outputs\portable_build\Remote_500m\data --output .\outputs\placement_direct_p95_ssh.zip
+scp -P 1959 .\outputs\placement_direct_p95_ssh.zip havfyh@its.npra.io:~/vaernett_500m/
+ssh -p 1959 havfyh@its.npra.io
+```
+
+In the SSH shell:
+
+```bash
+cd ~/vaernett_500m
+unzip -n placement_direct_p95_ssh.zip -d placement_direct_p95
+tmux new -s placement-p95
+```
+
+Inside that tmux session, run:
+
+```bash
+cd ~/vaernett_500m
+.venv/bin/python -u placement_direct_p95/run_direct_p95_placement.py > placement_direct_p95/run.log 2>&1
+```
+
+This uses 14 CPU workers and one prediction per candidate–target pair for all four
+networks. It verifies the existing terrain files before reusing them. Rerun the same
+command in the same folder to resume; copying the old local single-network checkpoints
+is not supported. The four NPZ and four GeoTIFF files are written under
+`placement_direct_p95/stage/outputs` on the server. Copy the `placement_gain_500m_road200_direct_p95*`
+results to `outputs\portable_build\Remote_500m\data\outputs` on Windows and restart Værnett.
+
+If **Tomt nett** is already finished, upload the current `placement_gain.py` as
+`placement_direct_p95/placement_gain_existing.py` alongside the original on SSH.
+From `~/vaernett_500m`, calculate only SVV, SVV + MET, and all stations in one
+pass using the staged inputs from the completed empty-network run:
+
+```bash
+.venv/bin/python -u placement_direct_p95/placement_gain_existing.py \
+  --dataset temperature:direct_p95 --station-network existing-networks \
+  --data-root placement_direct_p95/stage --work-dir placement_direct_p95/work_existing \
+  --workers 14 --radius-km 100 --overwrite
+```
+
+The three existing networks use their own Direct P95 baselines, not the 1 °C
+empty-network target. This leaves the empty map and the original checkpoints
+untouched. Repeat the same command with the same script and work directory to resume.
+
 Download observations → daily aggregation → station/grid terrain features → station pairs → chronological 80/20 station-to-station regressions → symmetric validation RMSE → ExtraTrees spatial RMSE model.
 The pipeline no longer evaluates placement gain or generates candidate-ranking surfaces.
 
@@ -42,25 +116,44 @@ an interrupted/stale phase is labelled explicitly. Progress is also printed in
 the calculation log.
 
 All known model stations in the chosen MET/Vegvær network stay visible regardless
-of the selected weather sensors. A white overlay marks stations without a selected
-sensor; these markers do not contribute to that weather layer. `Legg til sensor`
-beside `Fjern stasjon` offers missing sensors. This creates an ordinary editable
-manual proposal at the displayed station location, with only those sensors.
-It never changes observations, station metadata or training data. Proposals can
-be edited/removed under `Egne forslag`; sensors sharing an existing proposal cell
-are merged without moving that proposal.
+of the selected weather sensors. The weather selector offers only temperature;
+the station markers and popups still show all known sensors. A white overlay marks
+stations without a selected sensor; these markers do not contribute to that layer.
+Only the selected temperature profile is retained at startup. Other phenomena
+contribute station and sensor metadata, not their weather models or map surfaces.
+When using an older stage, metadata is extracted from its existing profiles
+without loading the corresponding models.
+New portable ZIPs contain the temperature model and compact metadata for the
+other sensors, but omit their models and weather profiles. An existing stage and
+previous ZIPs are not deleted; rebuild the portable ZIP to apply this change.
+New stations and sensor edits offer all six sensor types, independently of
+available weather models. Multiple sensors can be selected; sensors without a
+weather layer are saved as station metadata and do not trigger model loading.
+**Vegværstasjoner + MET-stasjoner** includes road-weather stations plus stations
+whose recorded owner list contains exactly **MET.NO**, including co-owned stations.
+Unknown ownership does not exclude a recognized road-weather station. Other
+non-road stations are excluded. The option requires the owner catalog and is
+preserved in saved scenarios; older scenarios retain their original network.
+Without a prepared combined-network baseline cache, its surface is calculated
+on demand. The SSH job below prepares a transferable cache to avoid repeating
+this work locally.
+The popup no longer offers the `Legg til sensor` and `Fjern sensor` buttons.
+Existing proposals can still be edited under `Egne forslag`.
+New-station popups also offer `Fjern stasjon` beside `Endre sensorer`.
 Adding sensors keeps one marker in its original circle/MET or square/Vegvær shape,
 showing both original and proposed sensors instead of stacking markers.
+Clicking an upgraded marker selects its proposed sensors when they contribute
+to a selected weather layer. `Endring i usikkerhet` then compares the scenario
+with and without those proposed sensors, retaining the original station and
+other proposals. With no active proposed sensor, selection uses the original
+station as before.
 A purple rim marks altered stations; stations without a selected sensor have no
 visible rim or shadow. The popup labels added sensors
 `Lagt til (forslag)` and allows editing/removing just those sensors. Dragging
 a combined marker in `Flyttemodus` moves the whole station, including its original
 and added sensors. Original observations and station metadata remain unchanged:
 all moves and sensor removals apply only to the scenario.
-Each sensor in the station popup has a `Fjern sensor` button. Removing an original
-sensor excludes that station only from the corresponding weather phenomenon;
-`Legg til sensor` can restore it. Removing the last sensor of a manual proposal
-removes the empty proposal. `Gjenopprett stasjon` restores original sensors.
+`Gjenopprett stasjon` restores original sensors in an existing scenario.
 Climate-zone legends and map popups show zone names without numeric prefixes.
 
 ### Roads lacking representation in a climate occurrence
@@ -71,7 +164,10 @@ Select only **Svært interessant kandidatområde** to highlight the highest
 category. Hover over a
 category for its national road length and occurrence count. Click the map for
 the status of its 250 m road cell; station markers still open their normal
-popups. The layer follows the county filter; category tooltips describe Norway.
+popups. If the cell has no selected coverage category, the click uses the
+normal map action instead, such as climate-zone information on Klimasoner.
+Clicks on road features likewise fall back to their normal road popup.
+The layer follows the county filter; category tooltips describe Norway.
 This is a fixed analysis of the original 849 eligible stations, **not** a
 live coverage calculation for the edited scenario. Missing a station inside
 an occurrence is not the same as being far from a station.
@@ -185,26 +281,42 @@ The header provides three save/open buttons:
   The background has no layer-panel entry. Tile failures show an explicit message.
   Map tiles are not embedded.
   Recipients can pan, zoom, adjust overlay transparency, toggle saved layers and
-  click stations for colour-coded sensors, observation periods and scenario changes.
+  click stations for colour-coded sensors and scenario changes.
   Calculation points and move indicators follow station visibility and have no
   separate layer-panel entry, regardless of the app's debug checkbox.
   The complete road selection is saved, including links outside the current
   viewport, using the category, class, road-reference and county filters.
   The road visibility checkbox only controls initial visibility, not inclusion.
   Road links expose their saved attributes.
-  A weather selector includes the saved view plus precomputed uncertainty maps
-  for temperature, wind, precipitation, snow, humidity and road temperature.
-  All six use the same station edits, sensor changes and county/corridor settings;
-  switching them does not require Python. **Usikkerhet** and **Grunnett** switch
+  The **Vis usikkerhet langs veg** checkbox switches both uncertainty and
+  placement gain between selected counties and the road corridor, using the
+  corridor distance set in the app when saving. Both extents are embedded even when the road corridor
+  or road overlay is hidden. The weather corridor is independent of the road
+  overlay's category, class and road-reference filters. The saved distance is
+  shown as **Viser usikkerhet inntil … m fra veg** and cannot
+  be changed without exporting again.
+  **Usikkerhet** and **Grunnett** switch
   between the edited scenario and the original, unedited station network for
-  each phenomenon. Both use the app's identical uncertainty legend labels
+  temperature. Both use the app's identical uncertainty legend labels
   (**Mindre usikkert** / **Mer usikkert**) and colour ramp.
-  The saved view preserves combined,
-  comparison or terrain displays. Other choices show individual uncertainty.
-  **Usikkerhet**, **Grunnett**, **Klimasoner** and **Bare bakgrunnskart** share
+  The temperature legend title is simply **Temperatur**, without units;
+  the reduction legend title is **Reduksjon**.
+  **Reduksjon** shows all changes in the saved scenario relative to its original
+  network, regardless of the selected station or **Alle endringer** button.
+  It respects the selected county/road extent, station network and station filters;
+  reduced uncertainty is blue and increased uncertainty is red.
+  Terrain and **Lagret visning** are not exported. Saving from terrain views
+  initially opens uncertainty instead.
+  The uncertainty maps cover the selected counties without the app's
+  minimum-RMSE or cold-air-basin-only display filters.
+  **Plasseringsgevinst** embeds the existing precomputed placement map for the
+  selected base network and selected counties; it does not change with proposed
+  stations or the uncertainty road-corridor checkbox. If that network's placement
+  result is unavailable, the export reports an error instead of using another network.
+  **Usikkerhet**, **Grunnett**, **Reduksjon**, **Plasseringsgevinst**, **Klimasoner** and **Bare bakgrunnskart** share
   one exclusive radio selector. The last option hides the weather/climate raster;
   station, road and basin overlays can also be unchecked for background only.
-  Changing the phenomenon does not enable a hidden raster.
+  Changing the display extent does not enable a hidden raster.
   The climate overview includes its own legend.
   Clicking it shows the zone and whole-zone summary statistics. Zone identification
   uses the saved 1600-pixel-high overview, not the native raster; boundary cells
@@ -360,6 +472,17 @@ files for the final executable build. The portable launcher reads its bundled
 resolution automatically. The 500 m stage includes a compact
 `Vegnett_VegScore_full` source and portable road-link caches. Existing ZIPs and
 running apps are not modified.
+
+Extract the complete ZIP before launching `Vaernett.exe`; the adjacent `_internal`
+folder contains required projection databases, models and runtime libraries.
+Portable map caches fingerprint the executable rather than loose Python source
+files, which PyInstaller stores inside the executable. Normal Python runs still
+fingerprint the rendering source files.
+First startup can take several minutes while preparing cold-air-basin layers.
+Repack releases with `build_portable.py` or Python's `zipfile`, not .NET ZIP update
+mode, which corrupted compressed empty entries in a sensor-fix archive. Verify
+archive CRCs, complete Windows extraction (including empty-file sizes), and normal
+executable startup before distributing a repacked ZIP.
 
 To use the returned 500 m data in the current Python app as well (without copying
 the stage into the main outputs folder), run:
@@ -602,30 +725,29 @@ Inspeksjonen følger valgt dybdegrense og legger ikke til en stasjon.
 - **Vindhastighet** bruker den lagrede femårsmodellen for kontinuerlig RMSE og vises i
   m/s. Kjør den eksakte Frost-forhåndsberegningen for vind separat før dette nettet
   kan vises eller redigeres.
-- Klikk en Frost-stasjon, et eget forslag i kartet/listen, eller
-  bruk **Valgt stasjon**. **Reduksjon** viser deretter den
+- Klikk en Frost-stasjon eller et eget forslag i kartet/listen. **Reduksjon** viser den
   valgte sammenligningen. Frost-markører viser også ID, navn og datoperiode.
-- Frost-nettet har to sammenligningsfaner:
-  - **Alle endringer** (standard): hele scenariet sammenlignes med opprinnelig
+- For Frost-nettet slår knappen **Alle endringer** mellom to sammenligninger:
+  - Når knappen er aktiv, sammenlignes hele scenariet med opprinnelig
     **Grunnett**, inkludert alle flyttinger, fjerninger og egne forslag.
     Valg av stasjon endrer ikke denne sammenligningen.
-  - **Valgt stasjon**: bare den valgte stasjonens effekt vises, med alle andre
+  - Når knappen er av (standard), vises bare den valgte stasjonens effekt, med alle andre
     scenarioendringer beholdt. For en uendret stasjon sammenlignes nettet med/uten
     stasjonen. For en flyttet stasjon sammenlignes dens nye plassering med dens
     opprinnelige plassering. For en fjernet, grå stasjon vises økningen i
     usikkerhet som fjerningen medfører, sammenlignet med å ha stasjonen tilbake
     på opprinnelig plass. Alle andre endringer beholdes i begge nett.
     Velger du en annen stasjon, forsvinner den forrige stasjonens effekt.
-  Fanebytte endrer ikke stasjonsplasseringer eller valgt stasjon.
+  Knappen endrer ikke stasjonsplasseringer eller valgt stasjon.
 - Bidraget er forskjellen mellom dagens nett **med og uten den valgte stasjonen**.
   Klikk på stasjon 5 i et nett med 12 stasjoner sammenligner altså alle 12 med de
   øvrige 11, ikke bare historisk forbedring da stasjon 5 ble satt inn.
-  Dette gjelder uendrede stasjoner i **Valgt stasjon** og stasjoner i foreslåtte nett.
+  Dette gjelder uendrede stasjoner når **Alle endringer** er av, og stasjoner i foreslåtte nett.
   Ved sammenligning mot grunnnett eller ved valgt flytting viser **Reduksjon**
   økt usikkerhet i rødt og redusert usikkerhet i blått.
   Fjerning av en stasjon kan bare øke eller bevare usikkerheten; økningen vises i rødt.
   Positive reduksjonsverdier betyr forbedring; negative verdier betyr økt usikkerhet.
-  Eksport bruker aktiv fane. Peke-forhåndsvisning og nøkkeltallpanelet er fjernet.
+  Eksport bruker aktiv sammenligning. Peke-forhåndsvisning og nøkkeltallpanelet er fjernet.
 - API-ets påvirkede areal teller ruter der forskjellen er større enn standardterskelen.
   Ved sammenligning mot grunnnett eller valgt flytting telles begge retninger
   (absolutt endring over terskelen);
@@ -637,11 +759,12 @@ Inspeksjonen følger valgt dybdegrense og legger ikke til en stasjon.
 - Klikk på et ledig kartpunkt for å legge til et eget forslag. Angre, fjern
   enkeltforslag eller fjern alle egne forslag. Bytte av grunnnett eller antall
   foreslåtte stasjoner fjerner egne forslag etter bekreftelse.
-- **Shift + klikk** i kartet (også på terrenglag eller veglenker) viser hvilken
-  aktiv stasjon som gir lavest forventet feil i den klikkede evalueringsruten.
+- **Alt + klikk** i kartet (også på terrenglag eller veglenker) viser hvilke
+  aktive stasjoner som passer best for stedet du klikket på.
   Dette endrer ikke scenariet. Flyttede og egne stasjoner tas med; fjernede
-  stasjoner utelates. Popupen viser stasjonsnavn, forventet feil og avstand,
-  samt nest beste stasjon med feil og forskjell fra den beste.
+  stasjoner utelates. For standardmodellen viser popupen et anslått 95 %-intervall
+  (± °C rundt stasjonens døgnmiddel), samt avstand til beste stasjon og
+  avviksgrensene for de andre stasjonene i listen.
   Beste stasjon merkes **1** med gul ring, og nest beste merkes **2** med lilla ring.
   Navn og stiplede linjer viser forbindelsene til stedet; kartet viser alle tre punktene.
   **Sammenlign terreng** åpner høyde, avstand til kyst/fjord, relieff,
@@ -653,19 +776,19 @@ Inspeksjonen følger valgt dybdegrense og legger ikke til en stasjon.
   Utvidelse av terrengtabellen beholder boksens valgte plassering.
   Tekniske modellnotater er fjernet fra katalogen; modellmetadata beholdes i API og eksport.
   Sammenligningen gjelder gjeldende scenario og værmodell, uavhengig av valgt
-  sammenligningsfane. Det er beste enkeltstasjon, ikke nødvendigvis den nærmeste.
+  sammenligning. Det er beste enkeltstasjon, ikke nødvendigvis den nærmeste.
 - I et ferdig beregnet Frost-nett kan du dra en Frost-markør til en annen terrengrute,
   eller velge stasjonen og fjerne den fra scenariet. Dette endrer ikke Frost-databasen.
   Du kan flytte eller fjerne flere Frost-stasjoner. Usikkerhetsflaten beregnes på nytt
-  eksakt for rutene der de redigerte stasjonene var best; bruk **Gjenopprett opprinnelig
-  Frost-nett** for å angre alle scenarioendringene.
+  eksakt for rutene der de redigerte stasjonene var best. En enkelt stasjon kan
+  gjenopprettes fra popupen. Tilbakestillingsknappen øverst nullstiller hele scenariet.
   Flyttede stasjoner har en grå markør på opprinnelig plass og en stiplet pil
   mot den nye plasseringen. Begge markørene velger samme stasjon; bare den nye
   kan dras. Ved gjentatt flytting peker pilen alltid fra opprinnelig til nyeste
   plassering. **Skjul stasjoner** skjuler også gamle plasseringer og piler.
   Fjernede stasjoner blir stående som grå, klikkbare markører på sin opprinnelige plass.
   De teller ikke i det aktive nettet. I **Alle endringer** vises endringen fra
-  grunnnettet; i **Valgt stasjon** viser en grå markør usikkerhetsøkningen ved fjerning.
+  grunnnettet; når **Alle endringer** er av, viser en valgt grå markør usikkerhetsøkningen ved fjerning.
 
 ### Hva Usikkerheten Betyr
 For hver rute brukes **laveste forventede feil fra én stasjon**:
@@ -689,9 +812,15 @@ versjonen. Argumentet `--frost-neighbors 0` aksepteres for kompatibilitet, men
 andre verdier avvises. Foreslått nett og egne forslag evalueres også mot alle
 mål-ruter med den valgte værmodellen.
 
-Usikkerhetskartet bruker blått for lav feil og rødt for høy feil. For alle fenomener
-tilpasses den logaritmiske fargeskalaen til 0,5- og 99,5-persentilen i den lagrede
-nasjonale **SVV-grunnflaten** (MET-stasjoner med vegnummer først i navnet).
+Usikkerhetskartet bruker blått for lav feil og rødt for høy feil. Temperaturens
+logaritmiske fargeskala bruker 0,5- og 99,5-persentilen av positive verdier i den
+lagrede nasjonale **SVV-grunnflaten** i ruter som berører en 200 m korridor
+rundt vegnettet uten kommunale veger. Nullverdier vises under nedre fargegrense.
+Dette bruker alle veger i datasettet uavhengig av vegpanelets filtre.
+Endre `ROAD_COLOUR_CALIBRATION_ENABLED` og
+`ROAD_COLOUR_CALIBRATION_DISTANCE_M` øverst i `station_app.py` for å slå
+vegkalibreringen av eller på og endre dens avstand. Start appen på nytt etterpå.
+Når kalibreringen er av, brukes SVV-grunnflatens nasjonale fargegrenser.
 Vegbanetemperatur bruker temperaturmodellens grenser ved samme oppløsning, slik
 at samme RMSE i °C har samme farge i de to kartene. For de andre fenomenene brukes
 deres egne grenser,
@@ -705,9 +834,25 @@ Zoom, panorering, vegfiltre og egne stasjoner endrer aldri fargeskalaen.
 Tallene i tegnforklaringen viser grensene; samme farge er derfor ikke nødvendigvis
 samme feil på tvers av modeller eller oppløsninger. Feilverdier, arealer og
 eksporterte rasterverdier endres ikke av fargeskalaen.
+Tallene vises automatisk mellom kartlagets overskrift og fargelinjen og følger
+kartlagets skala. Temperaturkartene for Direct P95 bruker de faste verdiene 0, 1 og 3 °C.
+**Plasseringsgevinst** viser tre tall, avrundet til hele enheter.
+**Endring i usikkerhet** viser i stedet bare endepunktene med enhet, samt 0
+i midten når sammenligningen kan gi både mer (minus) og mindre (pluss) usikkerhet.
+For Direct P95 viser **Tomt nett** det anslåtte intervallet på skalaen, fra ≥1 til 0 °C.
+Områder som ligger på eller over beregningsreferansen, får ingen farge.
+Endepunktene merkes med ≤ og ≥ der verdier utenfor fargegrensene
+bruker samme ytterfarge.
+Kategoriske tegnforklaringer, som klimasoner, har ikke en numerisk skala.
+For **Usikkerhet** og **Grunnett** lastes pikselverdier og farger sammen.
+**Skjul farger under** skjuler deretter piksler lokalt, uten nye kartforespørsler,
+og raske skyveendringer samles til siste verdi før neste opptegning.
+Grensen gjelder verdien i det viste rasterpikselet; modell- og eksportdata
+endres ikke. Ufiltrerte Frost-kart klargjøres med tallverdier før oppstart og
+gjenbrukes fra `outputs/station_app_cache/weather_maps` ved senere oppstarter.
 Forbered manglende SVV-grunnflater separat med
 `python precompute_frost.py --all-weather-maps --station-network both`.
-Forhåndsberegnede bilder for begge nett bruker også SVV-referansens fargegrenser.
+Gamle forhåndsberegnede bilder med andre fargegrenser brukes ikke.
 
 ### Responsiv Oppstart
 Appen starter som standard på **5000 m**. Finere evalueringsrutenett lastes først
@@ -819,9 +964,309 @@ evalueres de samme kildestasjonene på nytt med riktig modell og modellens enhet
 Første beregning av mange foreslåtte stasjoner på fint rutenett kan derfor ta tid;
 beregnede prefikser og prediksjoner mellomlagres i appens minne per modell og oppløsning.
 
-### Lagret Plasseringsgevinst (kun API)
-Plasseringsgevinst er fjernet fra appens faner. Det eksisterende API-et viser
-fortsatt `total_error_reduction` fra det lagrede
+### Plasseringsgevinst på 500 m langs veg
+
+`placement_gain.py` prøver én ny temperaturstasjon i hvert 500 m-terrengpunkt.
+Det eksisterende SVV-nettet er uendret mellom kandidatene; dette er ikke en
+sekvensiell, grådig utplassering. Gevinsten er
+`sum(max(SVV_RMSE - kandidat_RMSE, 0) * korridorareal_km2)`, med enhet **°C·km²**.
+Bare arealet innen **200 m** fra det ikke-kommunale vegnettet teller.
+Overlappende vegbuffere telles bare én gang. Bufferbuene polygoniseres med
+64 segmenter per kvadrant; arealvektet integrasjon er fortsatt en tilnærming
+der RMSE er konstant i hver 500 m-rute.
+
+Plasseringskartet tegnes på nytt for kartutsnittet ved panorering og zoom.
+Kystmasken bruker en romlig indeks og klippes til utsnittet før rasterisering,
+slik at ikke hele Norges detaljerte kystlinje behandles ved hver panorering.
+Dette endrer ikke gevinstverdiene, 500 m-rutenettet eller kystavgrensningen.
+Vegvær og Vegvær + MET bruker samme fargeskala, med maksimum fra det lagrede
+Vegvær-plasseringskartet. Tegnforklaringen viser «Mindre gevinst» og «Mer gevinst».
+Det opprinnelige Vegvær-resultatet må derfor også ligge i datamappen.
+
+**Vis** i Vegnett-panelet slår vegnettet av og på. Med **Vis poeng** av vises
+svarte veger over fargekartene og like over fylkesgrensene, uten klikkfunksjon.
+Med **Vis poeng** på brukes det opprinnelige, poengfargede vegnettet, med
+klikkfunksjon og GeoJSON-nedlasting. Bare ett av vegnettene vises om gangen.
+Standard er svarte veger på og poeng av; begge valg lagres i scenariofilen.
+Eldre scenariofiler uten poengvalget beholder den tidligere poengvisningen.
+
+Svarte veger bruker bare E-, R- og F-referanser fra
+`data/komprimert_nettverk_med_blindveg_10.gpkg`, inkludert blindveger. Vegkategori, vegnavn (for
+eksempel E6, Rv3 eller Fv17) og valgte fylker filtrerer også dette nettet.
+Scoreklassene finnes ikke i denne datakilden og er deaktivert uten **Vis poeng**;
+valgene beholdes til poengvisningen slås på igjen. Andre vegkategorier er bare
+tilgjengelige i poengvisningen. Visningsfiltrene endrer ikke værkartets vegkorridor.
+E/R/F-kandidater filtreres i GeoPackage-spørringen før geometrien lastes,
+og vegreferanser tolkes én gang per unik verdi. Geometrien leses én gang,
+romlig indekseres og tegnes som
+256-pikslers kartfliser med omtrent 1,5 pikslers linjebredde. Flisene forenkles
+etter zoom, klippes til flisens rektangel og rasteriseres samlet som flerlinjer
+når geometritypene tillater det. Flisene mellomlagres per filtervalg i serverminnet og nettleseren; panorering utløser
+verken scenario- eller værberegninger. Første visning bruker noen sekunder på
+innlesing. Filen tas med ved neste portable bygg.
+
+Standard påvirkningsradius er **100 km** rundt hver kandidat. Ruter med sentrum
+akkurat 100 km unna tas med. Utenfor radiusen settes kandidatens forbedring til
+null, uten å kjøre modellen. Det eksisterende SVV-grunnnettet begrenses ikke.
+Bruk `--radius-km 0` for beregning uten avstandskutt. Dette er en tilnærming;
+den kan redusere gevinsten og endre rangeringen av kandidater.
+
+Lag en kodepakke på Windows, uten å kopiere datasettet på nytt:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe prepare_placement_remote.py
+scp -P 1959 .\outputs\placement_gain_code.zip havfyh@its.npra.io:~/vaernett_500m/
+```
+
+På SSH-maskinen, med det tidligere ferdige 500 m-datastadiet og miljøet:
+
+```bash
+cd ~/vaernett_500m
+unzip -o placement_gain_code.zip
+source .venv/bin/activate
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+python -u placement_gain.py --data-root outputs/portable_build/Remote_500m/data --work-dir outputs/placement_road200_radius100 --workers 14 --benchmark 28
+```
+
+Forberedelse av korridorareal og bassengegenskaper skjer først og mellomlagres.
+Benchmarken skriver ingen endelig resultatflate. Prøv eventuelt `--workers 28`
+og sammenlign faktisk tid; 28 logiske CPU-er er ikke 28 fysiske kjerner.
+14 prosesser med én modelltråd hver er utgangspunktet for 14 fysiske kjerner.
+Deretter kan hele kjøringen startes i en eksisterende `tmux`-økt:
+
+```bash
+python -u placement_gain.py --data-root outputs/portable_build/Remote_500m/data --work-dir outputs/placement_road200_radius100 --workers 14 > outputs/placement_road200_radius100.log 2>&1
+```
+
+Samme kommando gjenopptar ferdige kandidatblokker etter avbrudd. Endrede
+inngangsdata, kode, radius eller relevante pakkeversjoner krever ny arbeidsmappe.
+Ingen kandidat–mål-matrise for hele landet lagres: inndata minnekartlegges,
+mål søkes med romlig indeks, og prediksjoner kjøres i avgrensede blokker.
+Eksisterende resultatfiler overskrives ikke uten `--overwrite`.
+
+Resultater i datastadiets `outputs`:
+- `placement_gain_500m_road200.npz`: appens resultatflate og beregningsmetadata.
+- `placement_gain_500m_road200.tif`: GeoTIFF i EPSG:25833 til ArcGIS.
+
+Kopier resultatene tilbake til samme lokale 500 m-datastadium:
+
+```powershell
+scp -P 1959 'havfyh@its.npra.io:~/vaernett_500m/outputs/portable_build/Remote_500m/data/outputs/placement_gain_500m_road200.*' .\outputs\portable_build\Remote_500m\data\outputs\
+```
+
+Etter oppstart/oppfrisking av appen vises **Plasseringsgevinst · 200 m
+vegkorridor** under **Kartlag**. Kartutsnitt gjengis ved panorering/zoom.
+Vanlig klikk foreslår en ny stasjon, akkurat som i usikkerhetskartet.
+Plasseringskartet er et fast beregningsresultat for det valgte grunnnettet;
+scenarioendringer og appens visningskorridor endrer det ikke.
+
+### Ny SSH-beregning med Vegværstasjoner + MET-stasjoner
+
+`--station-network svv-met` bruker unionen av vegværstasjoner og stasjoner med
+**MET.NO** i eierlisten som fast, uredigert grunnnett. Standardvalget `svv`
+beholder den opprinnelige beregningen. Kandidater, temperaturmodell, faktisk
+200 m vegkorridorareal, 100 km påvirkningsradius og parallelle kandidatberegninger
+er ellers uendret. Det nåværende datagrunnlaget har 453 vegværstasjoner og
+265 MET.NO-stasjoner, til sammen 718 temperaturstasjoner.
+
+Lag en separat kodepakke med eierdata fra Windows:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe prepare_placement_remote.py --include-owners --output .\outputs\placement_gain_svv_met_code.zip
+scp -P 1959 .\outputs\placement_gain_svv_met_code.zip havfyh@its.npra.io:~/vaernett_500m/
+```
+
+**Ikke pakk den ut over koden til den gamle jobben.** Bruk en egen kodemappe og
+arbeidsmappe, men gjenbruk det store datasettet og det eksisterende Python-miljøet:
+
+```bash
+cd ~/vaernett_500m
+mkdir -p placement_svv_met_code
+unzip -o placement_gain_svv_met_code.zip -d placement_svv_met_code
+
+nohup sh -c '
+.venv/bin/python -u placement_svv_met_code/placement_gain.py \
+  --data-root outputs/portable_build/Remote_500m/data \
+  --work-dir outputs/placement_road200_radius100_svv_met \
+  --station-network svv-met \
+  --radius-km 100 \
+  --workers 14
+status=$?
+printf "\nExit status: %s\n" "$status"
+exit "$status"
+' >> outputs/placement_road200_radius100_svv_met.log 2>&1 < /dev/null &
+
+tail -n 30 -f outputs/placement_road200_radius100_svv_met.log
+```
+
+Den nye grunnflaten beregnes først og sjekkpunktlagres med den eksisterende,
+eksakte delnettberegningen. XGBoost bruker opptil 14 tråder i denne fasen.
+Kandidatfasen bruker 14 prosesser med én modelltråd hver, som tidligere.
+Vent gjerne til den gamle jobben er ferdig for å unngå at to store jobber
+konkurrerer om samme CPU. Avbrudd kan gjenopptas med samme kommando og uendret
+kode, eierdata og parametere; ikke start to kopier av den nye jobben.
+
+Resultatene lagres separat i datamappens `outputs`:
+
+- `placement_gain_500m_road200_svv_met.npz`
+- `placement_gain_500m_road200_svv_met.tif`
+
+Eierdata, nettvalg og grunnflate inngår i fingeravtrykket. Gamle delresultater
+kan ikke brukes med det nye grunnnettet. Loggen viser `Baseline cache: ...`;
+kopier også denne lille grunnflatefilen tilbake til samme relative plassering
+i den lokale datamappen for å gjenbruke grunnflaten i appen uten ny beregning.
+Kopier NPZ/TIFF tilbake til den lokale datamappens `outputs`. Appen bruker det
+tilsvarende plasseringskartet når **Vegværstasjoner + MET-stasjoner** er valgt,
+og viser en tydelig feil hvis dette kartet ennå ikke finnes. Hvert nettvalg
+bruker sitt eget resultat; se beregningene for alle stasjoner og tomt nett nedenfor.
+
+### SSH: tomt nett først, deretter alle temperaturstasjoner
+
+De fire nettvalgene er knyttet til separate, uredigerte plasseringskart:
+
+| Nettvalg i appen | CLI-verdi | Resultatnavn i datamappens `outputs` |
+| --- | --- | --- |
+| Vegværstasjoner | `svv` | `placement_gain_500m_road200.npz/.tif` |
+| Vegværstasjoner + MET-stasjoner | `svv-met` | `placement_gain_500m_road200_svv_met.npz/.tif` |
+| Alle værstasjoner | `all` | `placement_gain_500m_road200_all.npz/.tif` |
+| Tomt nett | `empty` | `placement_gain_500m_road200_empty.npz/.tif` |
+
+`all` bruker den lagrede grunnflaten fra alle temperaturstasjoner, uten SVV-,
+eier- eller datofilter. Kandidater, 500 m rutenett, faktisk 200 m vegkorridorareal,
+100 km påvirkningsradius og 14 enkelttrådede prosesser er ellers som tidligere.
+Stasjoner uten temperaturmåling inngår ikke i temperaturgrunnflaten.
+
+Et tomt nett har ingen temperaturprediksjon og derfor ingen målt, endelig RMSE.
+For å kunne rangere den første stasjonen bruker `empty` en **antatt referansefeil
+på 0,5 °C** ved hvert målpunkt. Gevinsten er
+`sum(max(0.5 - kandidat_RMSE, 0) * korridorareal_km2)` innen 100 km fra kandidaten;
+utenfor radiusen gis ingen gevinst. Dette er en eksplisitt planleggingsantakelse,
+ikke en målt feil eller en ny modell for temperatur uten stasjoner.
+`--empty-reference-rmse` kan endre referansen i en separat beregning med ny
+arbeidsmappe; verdien kan påvirke rangeringen. Den lagres i sjekkpunktets
+fingeravtrykk, NPZ og GeoTIFF. Usikkerhetskartets behandling av tomt nett endres ikke.
+
+For å se denne reduksjonen i appen: velg **Tomt nett**,
+legg til én eller flere temperaturstasjoner og velg **Reduksjon**.
+Referansen er fast på **0,5 °C** og kan ikke endres i appen eller ved å
+åpne eldre scenariofiler med en annen referanse. Reduksjonen er
+`max(0.5 - scenarioets temperatur-RMSE, 0)`. Bare steder med RMSE
+strengt lavere enn referansen får farge; manglende prediksjoner og områder
+utenfor stasjonenes påvirkningsradius er gjennomsiktige.
+Eksempel: 0,5 °C referanse og 0,2 °C RMSE gir 0,3 °C reduksjon.
+Alle temperaturforslag i det tomme nettet inngår, uavhengig av valgt stasjon.
+Dette endrer ikke selve usikkerhetsverdiene eller referansen i en allerede
+lagret plasseringsgevinstfil. SSH-skriptet bruker også 0,5 °C og en egen
+arbeidsmappe, slik at gamle sjekkpunkter med 5 °C ikke blandes inn.
+
+Nett med eksisterende stasjoner bruker samme faste SVV-fargeskala.
+Tomt nett bruker en egen, fast skala fra sitt lagrede resultat, ellers ville
+de langt større gevinstene stort sett få maksimal rødfarge. Fargene i det tomme
+nettet kan derfor ikke sammenlignes direkte med fargene i de andre nettene.
+Tegnforklaringen beholder «Mindre gevinst» og «Mer gevinst»; hold over tittelen
+for å se referanseantakelsen for tomt nett.
+
+Lag og last opp en ny, separat kodepakke fra Windows:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe prepare_placement_remote.py --output .\outputs\placement_empty_all_ref05_20261115_code.zip
+scp -P 1959 .\outputs\placement_empty_all_ref05_20261115_code.zip havfyh@its.npra.io:~/vaernett_500m/
+ssh -p 1959 havfyh@its.npra.io
+```
+
+Kjør på SSH-maskinen:
+
+```bash
+cd ~/vaernett_500m
+mkdir -p placement_empty_all_ref05_20261115_code
+unzip -o placement_empty_all_ref05_20261115_code.zip -d placement_empty_all_ref05_20261115_code
+nohup sh placement_empty_all_ref05_20261115_code/run_placement_empty_all.sh \
+  >> outputs/placement_empty_all_ref05_20261115.log 2>&1 < /dev/null &
+echo "Started batch: $!"
+tail -n 30 -f outputs/placement_empty_all_ref05_20261115.log
+```
+
+Skriptet kjører **tomt nett først**, og starter **alle stasjoner straks det
+første er fullført**. Ved feil stopper det før neste jobb og skriver
+`Batch exit status`. De kjøres ikke parallelt. Arbeidsmappene er
+`outputs/placement_road200_radius100_empty_ref05` og
+`outputs/placement_road200_radius100_all`; tidligere SVV/MET-jobber endres ikke.
+Vent til eventuelle andre store jobber er ferdige for å unngå CPU-konkurranse.
+Start aldri to kopier av batchen samtidig.
+
+Samme uendrede skript kan gjenopptas etter et avbrudd. `--overwrite` i skriptet
+lar en allerede ferdig første jobb sette sammen sine sjekkpunkter og skrive
+sine egne resultatfiler igjen før den fortsetter til jobb to. Det omgår ikke
+kontrollen av endret kode, data eller referansefeil. Ikke erstatt kode i en
+mappe mens en jobb kjører, og ikke gjenbruk sjekkpunkter fra et annet nett.
+
+Kopier begge resultatpar tilbake fra Windows når de er ferdige:
+
+```powershell
+scp -P 1959 'havfyh@its.npra.io:~/vaernett_500m/outputs/portable_build/Remote_500m/data/outputs/placement_gain_500m_road200_empty.*' .\outputs\portable_build\Remote_500m\data\outputs\
+scp -P 1959 'havfyh@its.npra.io:~/vaernett_500m/outputs/portable_build/Remote_500m/data/outputs/placement_gain_500m_road200_all.*' .\outputs\portable_build\Remote_500m\data\outputs\
+```
+
+Ingen ekstra grunnflatefil trengs for disse to nettene. Start den oppdaterte
+Python-appen og velg ønsket **Stasjonsnett**. Manglende resultat gir en tydelig
+feil i stedet for å vise et annet netts plasseringsgevinst. Det lagrede kartet
+viser grunnnettet, ikke en ny optimalisering etter hvert stasjonsforslag eller
+etter dato-/sensorendringer i scenariet.
+**Skjul farger under** kan også brukes på plasseringsgevinst for å skjule
+områder med lav gevinst. Filteret nullstilles ved bytte mellom gevinstkartet og
+usikkerhetskartene.
+**Kartlag langs veger** begrenser også gevinstkartet til valgt avstand fra veg,
+både i appen og i nye lagrede HTML-kart.
+Plasseringsgevinst for ett værfenomen vises som fargede 256-pikslers kartfliser,
+uavhengig av bakgrunnskartets gråtoner. Før serveren starter, klargjøres
+ufiltrerte oversiktsfliser på zoomnivå 0–6 for alle tilgjengelige grunnnett.
+Disse lagres under `outputs/station_app_cache/placement_tiles` og gjenbrukes
+ved senere oppstarter. Første klargjøring kan ta noen minutter; fremdriften
+vises i terminalen. Endret kartgrunnlag eller tegningskode gir nye fliser.
+Panorering gjenbruker flisene; bare nye områder lastes. Serveren beholder opptil
+512 ferdige fliser og ett klargjort kilderaster i minnet. Nettleseren kan lagre
+flisene i én time. Flisene inneholder både gevinstverdier og opprinnelige farger.
+**Skjul farger under** endrer derfor bare gjennomsiktigheten lokalt i nettleseren,
+uten nye flisforespørsler. Raske skyveendringer samles til siste verdi før neste
+opptegning. Stasjonsnett, dataversjon, fylker og vegkorridor har separate
+hurtigbuffernøkler. Nye data krever at siden lastes på nytt.
+Detaljer over zoomnivå 6 og nye fylkes-/vegfilter tegnes ved behov og mellomlagres
+i minnet. HTML-eksport bruker fortsatt innebygde bilder og trenger ikke flistjeneren.
+
+### Prøve 100 km-radius i stasjonsappen
+
+Vanlig appoppstart og nye portable bygg bruker som standard 100 km radiuskutt
+for nye og flyttede stasjoner. Bruk `--station-radius-km 0` for å slå det av.
+Direkte opprettelse av `StationEngine`, blant annet i `host_station_app.py`,
+har fortsatt standard uten radiuskutt. Start en separat testinstans
+(ikke stopp en app med et ulagret scenario):
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe station_app.py --station-radius-km 100 --port 8790
+```
+
+Dette gjelder bare **nye/flyttede** stasjoner. Eksisterende grunnflater,
+stasjonsmarkører og sensorinformasjon beholdes. Utenfor 100 km konkurrerer
+ikke den nye stasjonen med grunnnettet. I et tomt nett er disse rutene uten
+beregnet verdi, ikke kunstig null usikkerhet. En merknad under Værstasjoner
+viser at forsøket er aktivt. Start uten flagget for opprinnelig oppførsel.
+Samme lagrede scenario kan åpnes i to separate instanser for visuell sammenligning.
+
+For målte prediksjonstider og resultatsammenligning på et lite utvalg:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe compare_station_radius.py --data-root .\outputs\portable_build\Remote_500m\data --candidates 3 --output .\outputs\radius_comparison.csv
+```
+
+CSV-en sammenligner ukachede prediksjoner og samme SVV-baseline med/uten kutt:
+tid, antall predikerte ruter, gjennomsnittlig/største RMSE-økning og endringer
+i rutene som berører 200 m-vegkorridoren. Dette er ikke arealvektet
+gevinstintegrasjon, og tre kandidatpunkter er ikke en nasjonal validering.
+Modellens prediksjoner utover 100 km er ekstrapolasjoner.
+
+### Eldre lagret Plasseringsgevinst (API)
+Uten det nye 500 m-resultatet viser det eksisterende API-et fortsatt
+`total_error_reduction` fra det lagrede
 femårskartet på **5000 m** for valgt værfenomen og prediksjonsmål. Hver rute
 angir total forventet feilreduksjon ved en ny stasjon på dette kandidatpunktet,
 summert over rutene i den lagrede beregningen. Det er ikke punktets lokale RMSE
@@ -1662,11 +2107,21 @@ ved klikkpunktet. Fylkesmasken og aktiv vegkorridor gjelder også her.
 Klimasoner er kun et bakgrunnslag: stasjonsnett, RMSE og de to RMSE-lagene i
 GeoPackage-eksporten endres ikke.
 
+### Hjelpetekst i appen
+**Hjelp**, til venstre for **Skjul stasjoner**, åpner en hvit, rullbar boks.
+Introduksjonen står øverst, fulgt av avsnitt for mappene i venstrepanelet.
+Lukk boksen med **Lukk**, Escape eller klikk utenfor.
+
+Rediger teksten direkte i `station_app.html`: søk etter `id="help-content"`.
+Bruk `<h3>` for seksjonsoverskrifter og `<p>` for avsnitt, og legg til flere
+`<section>`-blokker ved behov. Oppfrisk nettleseren etter lagring.
+Teksten er felles for appen; den redigeres ikke eller lagres som en del av et scenario.
+
 ### Stasjonsmarkører og Terrenglag
 Kartknappen **Skjul stasjoner** skjuler Frost-stasjoner og
 egne stasjonsmarkører. Knappen skifter deretter til **Vis stasjoner**. Stasjonene
 er fortsatt med i beregningen; nett, valgt stasjon, usikkerhet og veglag endres
-ikke av synlighetsvalget. Stasjoner kan fortsatt velges fra **Valgt stasjon**.
+ikke av synlighetsvalget. Vis stasjonene igjen for å velge dem i kartet.
 
 Velg et felt under **Terrenglag** for å erstatte værflaten i kartet:
 - **Høyde over havet**, i meter.
@@ -1694,9 +2149,11 @@ ArcGIS-eksport gjelder fortsatt værscenariet, ikke det viste terrengfeltet.
 Velg **Værkart** eller et av værkartlagene for å gå tilbake til værflaten.
 
 ### Vegnett og Usikkerhet Langs Veg
-Veglaget bruker `data/komprimert_nettverk_uten_blindveg_10.gpkg`, lag
-`komprimert_nettverk_uten_blindveg_10`, skrivebeskyttet. Filen har 404 996
-lenker i EPSG:25833. Geometri og romfilter leses med GeoPackage-driveren og
+Det svarte veglaget bruker `data/komprimert_nettverk_med_blindveg_10.gpkg`, lag
+`komprimert_nettverk_med_blindveg_10`, skrivebeskyttet. Filen har 2 797 839
+lenker i EPSG:25833; 452 498 E/R/F-lenker brukes i bakgrunnsvisningen.
+Dette endrer ikke datakilden for poengvisning eller værkartets vegkorridor.
+Geometri og romfilter leses med GeoPackage-driveren og
 et separat mellomlager; det kreves ingen ombygging av kildedata.
 
 Vegklasse (`roadclass`, 0–10) er forskjellig fra vegkategori (E/R/F/K/P/S).
@@ -1726,17 +2183,17 @@ Under **Vegnett** kan du:
 - Velge nøytral vegfarge eller farge etter **usikkerhet**. Ferjelenker vises stiplet.
 - Klikke på en lenke for å se nummer, navn, klasse, type og modellert feil,
   samt velge **Foreslå stasjon her**. Et vanlig vegklikk legger ikke til en stasjon.
-- Vise værkartet bare i ruter berørt av en **vegkorridor** på 0–5000 m rundt
-  de filtrerte vegene. Lagrede kart bruker dette som visningsfilter. Peke-beregning
-  avgrenses også til disse rutene; selve værmodellen endres ikke.
+- Under **Værfenomen** kan værkartet begrenses til ruter som berører en
+  vegkorridor rundt hele vegnettet uten kommunale veger. Standardavstanden er
+  2000 m. Valget er uavhengig av om veglaget vises og av vegpanelets filtre.
+  Dette er et visningsfilter; selve værmodellen endres ikke.
 - Laste ned viste lenker som `vegnett_utsnitt.geojson` med geometri i WGS84,
   originale lenkeegenskaper og beregnede feilverdier. Hver lenke får også
   `weather_dataset`, `weather_unit` og `target_cell_m` for bruk i GIS.
 
 Vegpanelet viser ikke lenger sum lenkelengde, gjennomsnittsfeil, 90-persentil
 eller km veg med bidrag. Beregningene beholdes i API- og nedlastingsdata.
-De fire lenkene med høyest gjennomsnittsfeil vises som et
-klikkbart utvalg. Lengder summerer nettverkslenker; parallelle eller overlappende
+Lengder summerer nettverkslenker; parallelle eller overlappende
 lenker telles separat og er ikke slått sammen til unik fysisk veglengde.
 
 Feilverdier hentes fra den **eksisterende valgte evalueringsruten**, ikke fra
@@ -1753,12 +2210,12 @@ i panelet. Vegfarge og popup bruker lengdevektet gjennomsnittsfeil per lenke,
 ikke en kontinuerlig værberegning langs linjen. **Veg med bidrag** gjelder den
 lagrede valgte stasjonen, ikke en flyktig peke-forhåndsvisning.
 
-Når **Vis** for vegnettet er aktivert, beregnes nye peke-forslag bare mot rutene
-i korridoren rundt filtrerte, viste veger i gjeldende kartutsnitt. Dette gjelder
-også når «Værkart langs valgte veger» ikke er avkrysset: den innstillingen styrer
-det lagrede kartlaget, mens pekevisningen automatisk prioriterer de synlige vegene.
-**Korridoravstand**, kategori, klasse og vegnummer bestemmer ruteutvalget. Slå av
-veglaget for vanlig peke-beregning over hele nettet.
+Visningskorridorens avstand er uavhengig av avstanden som brukes til å kalibrere
+fargeskalaen. Vegnummer, kategori og klasse i vegpanelet påvirker bare veglaget,
+ikke værkartets korridor.
+**Vis vegscoreklasse 4** (grønn) og **Vis vegscoreklasse 5** (magenta) kan
+slås på uavhengig av hverandre og av det svarte vegnettet. Begge er av ved oppstart
+og etter tilbakestilling til standard.
 
 Merkingen **Veg · N ruter** angir at peke-tallene gjelder akkurat dette lokale
 utvalget, ikke hele Norge. Gjennomsnittsfeil og reduksjon er rutevektede
@@ -1779,6 +2236,19 @@ vist med store ruter; korridorvalget forbedrer ikke modellens romlige oppløsnin
 Nettets ordinære nøkkeltall og ArcGIS-rastereksport gjelder fortsatt hele
 scenariet. Vegpanelets tall og GeoJSON-nedlasting gjelder bare filtrerte lenker
 i kartutsnittet.
+
+Kommunale veger fjernes fra appens indekserte vegdatakopi. Den opprinnelige
+datakilden beholdes uendret. Kopien inneholder bare feltene som vegvisningen,
+filtreringen og VegScore-komponentene trenger. Første oppstart med en eksisterende datakilde kan
+ta lengre tid fordi den filtrerte kopien og den nasjonale vegmasken må bygges;
+de gjenbrukes ved senere oppstarter. Nye portable ZIP-filer inneholder bare den
+filtrerte vegdatakopien, ikke den opprinnelige geodatabasen eller den gamle
+ufiltrerte GeoPackage-filen. Ved gjenbruk av et 500 m stage beholdes originalene
+i stage-mappen, men de tas ikke med i ZIP-filen.
+
+Når det ikke finnes forhåndsberegnede veg-rutekoblinger for valgt avstand,
+undersøker korridorberegningen nærmeste veg for hver rute i stedet for å
+beregne alle veg–rute-par. Ruter som berører korridorgrensen er fortsatt med.
 
 Den tidligere grensen på 12 000 lenker er fjernet. Alle filtrerte lenker i
 kartutsnittet tas med. Under zoomnivå 8, når utvalget har mer enn 2000 lenker,
@@ -1801,12 +2271,34 @@ Vegkilder og modeller endres ikke. Om GeoJSON-lagring ikke støttes i den
 integrerte VS Code-nettleseren, bruk samme lokale appadresse i vanlig nettleser.
 
 ### Forhåndsberegn Vegkorridorer
-Kjør separat for å lagre koblingen mellom veglenker og alle tre terrengrutenett:
+For værkartets ufiltrerte korridor kan du lagre én eksakt avstand til nærmeste
+veg per terrengrute, for avstander opptil 2000 m:
+
+```powershell
+python -u precompute_road_grid.py --cell-m 1000 --nearest
+```
+
+For den returnerte 500 m-datamappen:
+
+```powershell
+.\.venv-seasonal-app\Scripts\python.exe -u precompute_road_grid.py --data-root ".\outputs\portable_build\Remote_500m\data" --cell-m 500 --nearest
+```
+
+Avstanden måles fra den kvadratiske ruten til nærmeste veg uten kommunale veger.
+En lagret avstand kan sammenlignes direkte med for eksempel 500 eller 2000 m.
+Ruter langs kanten av kartutsnittet beregnes separat for å bevare eksakt
+avgrensning; fylkes- og vegfiltre bruker også den ordinære beregningen.
+Avstander over den lagrede grensen faller tilbake til ordinær beregning. Filen
+er knyttet til vegdatakilden og rutenettet, og må beregnes på nytt hvis de endres.
+500 m-cachen følger med ved portable bygg som gjenbruker den samme datamappen.
+
+For en mer detaljert kobling mellom **alle** aktuelle veglenker og terrengruter,
+som også støtter vegfiltre, bruk:
 ```powershell
 python -u precompute_road_grid.py
 ```
-Standard er eksakt avstand 0–500 m mellom veggeometrien og hver kvadratiske
-terrengrute. Alle vegklasser og kategorier tas med. Lenke-ID knytter resultatet
+Standard er eksakt avstand 0–1000 m mellom veggeometrien og hver kvadratiske
+terrengrute. Alle vegklasser og kategorier i vegnettet uten kommunale veger tas med. Lenke-ID knytter resultatet
 til den lagrede vegklasse-/kategori-/vegnummerindeksen, slik at filtrene kan
 brukes uten ny romlig søking over hele vegnettet. Dette krever ingen værmodell
 eller Frost-beregning. Ferdige filer gjenbrukes og ligger i
@@ -1821,8 +2313,9 @@ ikke en ny lokal skala ved hvert zoomnivå. Nærbilder bruker fortsatt originald
 Nettleseren har høyst én vegforespørsel i arbeid; ved raske endringer etterspørres
 deretter bare det siste valget, uten opphopning av avbrutte beregninger.
 
-Bruk `--cell-m 5000 2500` for bestemte rutenett, `--distance-m 1000` for større
-avstander, eller `--dry-run` for å vise kjøringen uten å skrive. Kilden,
+Bruk `--cell-m 5000 2500` for bestemte rutenett, `--distance-m 2000` for større
+avstander, eller `--dry-run` for å vise kjøringen uten å skrive. Store avstander
+kan produsere svært store filer fordi alle relevante veg–rute-par lagres. Kilden,
 rutesentrene, radrekkefølgen og rutestørrelsen inngår i nøkkelen.
 Mindre korridoravstander kan filtreres fra en større forhåndsberegning.
 Manglende filer eller avstander utover lagret maksimum bruker den opprinnelige
@@ -1888,6 +2381,16 @@ hel-bassengdybde og sum av hele volumene for individuelle overlappende bassenger
 Disse er potensielle terrengforsenkninger, ikke nødvendigvis vann.
 Gjengitte helvolumer kan ikke summeres på tvers av ruter.
 Eksisterende Station Lab-modeller og profiler endres ikke.
+
+For et separat eksperiment kan 30-årspakken bruke målet
+`absolute-error-p95` med `--target-metric`. Da predikeres gjennomsnittet av de
+to retningenes 95-persentiler for absolutte evalueringsresidualer i stedet for
+RMSE-etiketten.
+Alle datoer, egenskaper, romlige delinger og CPU/GPU-modeller beholdes.
+Dette er ikke i seg selv et kalibrert 95 % prediksjonsintervall for temperatur,
+og den eksisterende modellen/installeringen skal ikke overskrives med forsøket.
+Se [serverveiledningen](remote_senorge/SERVER_README.md) for separat pakking
+og kjøring.
 
 #### Nytt eksperimentelt valg i Værnett
 
@@ -3073,8 +3576,9 @@ roads are grouped by category and score class with length-weighted scores;
 zoom in for individual link scores. VS_Total is a separate prioritization input,
 not predicted RMSE and does not change model inference or station ranking.
 Existing non-score RoadNetwork inputs remain supported.
-`build_portable.py` bundles the current `ProssExport.gdb` and validates this same
-full layer, including when `--reuse-stage` is used. Its smoke test checks the
+`build_portable.py` validates the current `ProssExport.gdb` and bundles an
+indexed copy of this layer without municipal roads, including when `--reuse-stage`
+is used. The original source is preserved. Its smoke test checks the
 running portable app's selected road layer. Rebuild the executable after runtime
 code changes; `--reuse-executable` rejects outdated road/app/launcher code.
 Previously built ZIPs are not changed automatically.
@@ -3249,3 +3753,5 @@ python -m unittest test_station_app -v
   --cell-m 500 `
   --name Vaernett_500m_20261112 `
   --reuse-stage ".\outputs\portable_build\Remote_500m\data"
+
+& ".\.venv-portable-build\Scripts\python.exe" -u build_portable.py --cell-m 500 --name Vaernett_500m_temperature_20261113 --reuse-stage ".\outputs\portable_build\Remote_500m\data"

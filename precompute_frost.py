@@ -50,7 +50,7 @@ def parse_args(argv=None):
                         help="Fenomenene som skal beregnes; standard er alle")
     parser.add_argument("--cell-m", "--grid-spacing-m", nargs="+", type=int,
                         choices=[5000, 2500, 1000, 500], default=[5000, 2500, 1000])
-    parser.add_argument("--kind", choices=["continuous", "class", "senorge", "senorge30", "senorge30_pross",
+    parser.add_argument("--kind", choices=["continuous", "class", "senorge", "senorge30", "senorge30_pross", "direct_p95",
                         "seasonal_winter_tg", "seasonal_summer_tg", "seasonal_winter_tn", "seasonal_summer_tn",
                         "seasonal", "all"], default="all",
                         help="Choose senorge explicitly for the experimental local-pair profile")
@@ -77,6 +77,9 @@ def parse_args(argv=None):
 
 def selected_modes(registry, args):
     used = set(PHENOMENON_DATASETS.values())
+    available = {mode["id"] for mode in registry.available}
+    if PHENOMENON_DATASETS.get("temperature") not in available and "temperature:senorge30" in available:
+        used.add("temperature:senorge30")
     modes = [mode for mode in registry.available if mode["phenomenon"] in args.phenomenon and
              ((args.kind == "all" and (mode["id"] in used or getattr(args, "include_experimental", False)))
               or mode["kind"] == args.kind

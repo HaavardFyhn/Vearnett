@@ -1,9 +1,12 @@
 import argparse
+import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
 import train_senorge_grid_pairs as training
+from prepare_senorge_multi_target import TARGETS, pair_labels, prepare as prepare_multi
 import predict_senorge_grid_pairs as inference
 import geopandas as gpd
 import netCDF4
@@ -13,6 +16,20 @@ from shapely.geometry import box
 
 
 class GridPairTrainingTests(unittest.TestCase):
+    def test_multi_target_labels_distinguish_direct_difference_from_regression(self):
+        x = np.arange(100, dtype=np.float32)
+        fitting = np.stack([x, x + 5, np.full_like(x, np.nan)])
+        evaluation = fitting[:, :30].copy()
+        evaluation[1, 0] = np.nan
+        evaluation[1, 1:4] += 10
+        values = pair_labels(fitting, evaluation, np.array([[0, 1], [1, 0], [0, 2]]))
+        delta = evaluation[1, 1:] - evaluation[0, 1:]
+        residuals = delta - 5
+        expected = [np.sqrt(np.mean(delta**2)), np.quantile(np.abs(delta), .95),
+                    np.sqrt(np.mean(residuals**2)), np.quantile(np.abs(residuals), .95)]
+        np.testing.assert_allclose(values[:2], [expected, expected], rtol=1e-6)
+        self.assertTrue(np.isnan(values[2]).all())
+
     def test_whole_basin_volume_overlap_and_boundary_touch(self):
         grid = gpd.GeoDataFrame(dict(x=[500., 1500., 2500.], y=[500., 500., 500.]),
                                 geometry=gpd.points_from_xy([500, 1500, 2500], [500]*3), crs=25833)
@@ -45,6 +62,16 @@ class GridPairTrainingTests(unittest.TestCase):
                 errors.append(np.sqrt(np.mean((b[80:][keep]-slope*a[80:][keep]-intercept)**2)))
             expected.append(np.mean(errors))
         np.testing.assert_allclose(actual, expected, rtol=1e-10)
+
+    def test_symmetric_percentile_label_uses_absolute_errors_in_both_directions(self):
+        forward = np.array([[0., 1.], [1., 2.], [2., 4.], [8., 7.]])
+        reverse = np.array([[1., 0.], [3., 1.], [5., 3.], [9., 9.]])
+        actual = training.symmetric_percentile_labels(forward, reverse)
+        expected = (np.quantile(np.abs(forward), .95, axis=0) +
+                    np.quantile(np.abs(reverse), .95, axis=0))/2
+        np.testing.assert_allclose(actual, expected)
+        with self.assertRaisesRegex(ValueError, "Invalid directional residuals"):
+            training.symmetric_percentile_labels(np.full((2, 1), np.nan), np.full((2, 1), np.nan))
 
     def fixture_grid(self):
         x = np.concatenate([260500 + block*110000 + np.arange(10)*1000 for block in range(8)])
@@ -187,6 +214,25 @@ class GridPairTrainingTests(unittest.TestCase):
             from prepare_senorge_server import prepare
             import zipfile
             from remote_senorge.train_remote import load_data
+            multi_zip = root / "multi.zip"
+            prepare_multi(args.output_dir, root / "multi_cache", multi_zip, 250)
+            multi_folder = root / "multi"
+            with zipfile.ZipFile(multi_zip) as zipped:
+                self.assertIsNone(zipped.testzip())
+                zipped.extractall(multi_folder)
+            previous = None
+            for target in TARGETS:
+                current, multi_meta = load_data(multi_folder, target)
+                self.assertEqual(len(current["y"]), 250)
+                self.assertEqual(multi_meta["target_metric"], target)
+                if previous is not None:
+                    for key in ("x", "train", "test", "grid_id_1", "grid_id_2"):
+                        np.testing.assert_array_equal(current[key], previous[key])
+                previous = current
+            self.assertAlmostEqual(float(current["y"][0]), float(np.mean([
+                np.quantile(np.abs(b[~mask] - np.polyval(np.polyfit(a[mask], b[mask], 1), a[~mask])), .95)
+                for a, b in ((values[:, 0], values[:, 1]), (values[:, 1], values[:, 0]))
+            ])), places=5)
             package = root / "package"
             prepare(args.output_dir, package)
             unpacked = root / "unpacked"
@@ -203,6 +249,34 @@ class GridPairTrainingTests(unittest.TestCase):
             self.assertTrue((data["y"] >= 0).all())
             with self.assertRaises(FileExistsError):
                 prepare(args.output_dir, package)
+            percentile_rows = training.stream_labels(
+                list(sorted(archive.glob("*.nc"))), actual_grid, pairs, args.output_dir / "cache",
+                plan=plan, target_metric="absolute-error-p95")
+            percentile_direct = []
+            for a, b in ((values[:, 0], values[:, 1]), (values[:, 1], values[:, 0])):
+                slope, intercept = np.polyfit(a[mask], b[mask], 1)
+                percentile_direct.append(np.quantile(np.abs(b[~mask]-slope*a[~mask]-intercept), .95))
+            self.assertAlmostEqual(percentile_rows.target_error.iloc[0],
+                                   float(np.mean(percentile_direct)), places=5)
+            p95_package = root / "p95_package"
+            external_archives = root / "external_archives"
+            external_archives.mkdir()
+            for path in archive.glob("*.nc"):
+                shutil.copyfile(path, external_archives / path.name)
+            shutil.rmtree(args.output_dir / "cache" / "absolute_error_p95_v2")
+            prepare(args.output_dir, p95_package, "absolute-error-p95",
+                    archive_dir=external_archives)
+            p95_cache_identity = json.loads(
+                (args.output_dir / "cache" / "absolute_error_p95_v2" / "metadata.json").read_text())
+            self.assertTrue(all(Path(item["path"]).parent == external_archives
+                                for item in p95_cache_identity["archives"]))
+            p95_unpacked = root / "p95_unpacked"
+            with zipfile.ZipFile(root / "p95_package.zip") as zipped:
+                zipped.extractall(p95_unpacked)
+            p95_data, p95_meta = load_data(p95_unpacked)
+            self.assertEqual(p95_meta["target_metric"], "absolute-error-p95")
+            self.assertAlmostEqual(float(p95_data["y"][0]),
+                                   float(np.mean(percentile_direct)), places=5)
             changed_plan = training.date_plan(args.years, days_per_month=10,
                                               temporal_split="monthly-random", seed=18)
             with self.assertRaisesRegex(ValueError, "Datoutvalg"):

@@ -106,9 +106,10 @@ def model_stations(data_root, owner_catalog):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     stations = {}
     for dataset in PHENOMENON_DATASETS.values():
-        if dataset not in manifest["profiles"]:
+        entry = manifest.get("station_profiles", {}).get(dataset) or manifest["profiles"].get(dataset)
+        if entry is None:
             raise ValueError(f"Missing station profile: {dataset}")
-        profile_path = data_root / manifest["profiles"][dataset]["profile"]
+        profile_path = data_root / entry["profile"]
         profile = joblib.load(profile_path)
         for row in profile["stations"].to_dict("records"):
             identifier = str(row["station_id"])

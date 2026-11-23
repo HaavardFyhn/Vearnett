@@ -25,13 +25,21 @@
     @media(max-width:340px){.road-options{grid-template-columns:1fr}.road-classes{grid-template-columns:1fr 1fr}}
     .station-control{display:flex;align-items:center;gap:5px}.station-control select{flex:1;min-width:0;max-width:none}.station-control .icon-button{flex:0 0 30px}#frost-edit-status{min-height:0}.frost-pin{background:#075d96;border:2px solid #fff;border-radius:50%;box-shadow:0 1px 5px #202b29;cursor:grab}.frost-pin.selected{background:#253b32;border-color:#edb138}.frost-pin.locked{cursor:pointer;opacity:.72}
     .frost-pin.removed{background:#929995;cursor:pointer}.frost-pin.removed.selected{background:#929995;border-color:#edb138}
-    .comparison-tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px}.comparison-tabs button{flex:1;padding:8px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--muted);font-size:12px}.comparison-tabs button[aria-selected=true]{background:var(--green);color:#fff}.comparison-tabs[hidden]{display:none}
+    .comparison-tabs{display:flex;flex-wrap:wrap;gap:4px}.comparison-tabs button{flex:1;padding:8px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--muted);font-size:12px}.comparison-tabs button[aria-pressed=true]{background:var(--green);color:#fff}.comparison-tabs[hidden]{display:none}
     .station-inspection p{margin:6px 0}.station-inspection strong{font-size:14px}.station-inspection .inspection-error{font-weight:500}.station-inspection details{margin:12px 0}.station-inspection summary{cursor:pointer;color:var(--green)}.station-inspection table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}.station-inspection th,.station-inspection td{padding:4px 5px;border-bottom:1px solid var(--line);text-align:right}.station-inspection th:first-child{text-align:left;font-weight:400}.inspection-station-label{font-weight:600;border:2px solid #edb138;width:max-content;max-width:230px;white-space:normal}.station-inspection button{width:100%;justify-content:center}
     .inspection-drag-handle{cursor:grab;touch-action:none;user-select:none;color:var(--muted);font-size:11px;padding:4px 20px 8px 0}.inspection-drag-handle:focus-visible{outline:2px solid var(--green);outline-offset:2px}.inspection-dragging,.inspection-dragging .inspection-drag-handle{cursor:grabbing}.inspection-runner{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}.station-inspection .inspection-runner strong{font-size:12px}
     .inspection-runner-label{border-color:#7851a9}.station-inspection table th:nth-child(3){color:#075d96}.station-inspection table th:nth-child(4){color:#7851a9}.station-inspection details{overflow-x:auto}
     .frost-pin.original,.frost-pin.original.selected{background:#929995;cursor:pointer}.frost-pin.original.selected{border-color:#edb138}.station-move-arrow{background:none;border:0;pointer-events:none}
     .weather-modes{flex-wrap:wrap;gap:3px}.weather-modes button{flex:1 1 calc(50% - 3px);min-width:0;white-space:normal}
     .catalog-section{position:relative}.catalog-details>summary{display:flex;align-items:center;gap:8px;list-style:none;cursor:pointer;font-size:13px;font-weight:600;line-height:24px;margin:0;color:var(--ink)}.catalog-details>summary::-webkit-details-marker{display:none}.catalog-details>summary::before{content:"";width:6px;height:6px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;flex:0 0 6px;margin-right:2px}.catalog-content{margin-top:14px}.catalog-tools{position:absolute;right:20px;top:20px;display:flex;align-items:center;gap:8px}.catalog-section:has(.catalog-tools)>.catalog-details>summary{padding-right:86px}.catalog-details .catalog-count{font-size:11px;font-weight:400;color:var(--muted);margin-left:auto}.catalog-details #network{max-width:100%}@media(max-width:620px){.catalog-tools{right:18px;top:15px}}
+  </style>
+  <style>
+    .legend-numbers{position:relative;min-width:260px;height:14px;margin:0 0 4px;font:10px 'IBM Plex Mono',monospace;color:var(--muted)}
+    .legend-numbers span{position:absolute;transform:translateX(-50%);white-space:nowrap}
+    .legend-numbers span:first-child{transform:none}
+    .legend-numbers span:last-child{transform:translateX(-100%)}
+    .legend-numbers[hidden]{display:none}
+    @media(max-width:340px){.legend-numbers{min-width:230px;font-size:9px}}
   </style>
   <style>.export[hidden]{display:none}
     .catalog-details>summary::before{transform:rotate(var(--panel-arrow-collapsed))}
@@ -47,7 +55,31 @@
     .add-popup label{display:flex;align-items:center;gap:6px;margin:4px 0;color:var(--ink)}.popup-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:8px}.popup-actions button{padding:4px 10px;cursor:pointer}
     .station-sensors{display:block;margin-top:2px}
     #rmse-min-value{display:inline-block;width:24px;height:16px;border:1px solid #bcc8c0;border-radius:3px;vertical-align:middle;margin-left:5px}
+    #rmse-filter:not([hidden]){display:grid;grid-template-columns:1fr auto;row-gap:2px}
+    #rmse-cutoff-text{grid-column:1/-1;justify-self:end;text-align:right;font-size:11px;color:var(--muted)}
     #station-visibility{width:120px;min-width:120px;height:36px;padding:0 10px;font-size:12px;white-space:nowrap}
+    .map-toolbar #help-open{width:auto;padding:0 12px;font-size:12px}
+    #help-dialog{width:min(720px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 32px);padding:0;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);box-shadow:0 8px 40px #0003}
+    #help-dialog::backdrop{background:#0005}
+    .help-layout{display:flex;flex-direction:column;height:min(80dvh,760px)}
+    .help-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 24px;border-bottom:1px solid var(--line);flex-shrink:0}
+    .help-header h2{font-size:20px}.help-header button{padding:6px 12px}
+    .help-content{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:22px 24px 28px;background:#eef2f5;color:#1f2937;font:14px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;overflow-wrap:anywhere}
+    .help-content h1{margin-top:0;font-size:1.75rem;color:#12344d}
+    .help-content h2{margin-top:2.2rem;padding-bottom:.35rem;border-bottom:2px solid #dbe3ea;color:#12344d;font-size:1.25rem;line-height:1.35}
+    .help-content h3{margin-top:1.55rem;color:#005a9c;font-size:1rem;line-height:1.4;font-weight:600}
+    .help-content p{margin:.65rem 0}.help-content li{margin:.28rem 0}
+    .help-content ul,.help-content ol{padding-left:1.5rem}
+    .help-content .lead{font-size:1.1rem;font-weight:650}
+    .help-content .notice,.help-content .tip{margin:1.2rem 0;padding:1rem 1.15rem}
+    .help-content .notice{border-left:5px solid #d99b00;background:#fff7df}
+    .help-content .tip{border-left:5px solid #005a9c;background:#f3f7fa}
+    .help-content code{padding:.1rem .3rem;border-radius:4px;background:#edf2f7}
+    .help-content a{color:#005a9c}
+    @media(max-width:620px){.help-header{padding:14px 16px}.help-content{padding:16px}}
+    .panel-footer{padding:14px 20px 20px;text-align:center;color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+    .panel-footer p{margin:0}.panel-footer a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+    .panel-footer hr{border:0;border-top:1px solid var(--line);margin:10px -20px}
     .inspection-third-label{border-color:#16845c}.station-inspection table th:nth-child(5){color:#16845c}
     @media(max-width:620px){.map-toolbar{flex-wrap:wrap;align-items:flex-start}.map-toolbar .modes{max-width:100%}.map-tools{margin-left:auto}}
     .load-status{display:grid;gap:4px;width:280px;max-width:60%;font-size:12px;color:var(--muted)}.load-status progress{width:100%;height:7px;accent-color:var(--green)}.load-status progress[hidden]{display:none}.load-status[aria-busy=true]{color:var(--ink)}
@@ -129,26 +161,29 @@
     <button id="save-scenario" type="button" disabled>Lagre scenario</button>
     <button id="load-scenario" type="button" disabled>Åpne scenario</button>
     <input id="scenario-file" type="file" accept=".json,application/json" hidden>
-    <input id="export" type="button" href="/api/export.gpkg" aria-disabled="true" value="Eksporter til ArcGIS">
+    <input id="export" type="button" href="/api/export.gpkg" aria-disabled="true" value="Eksporter til ArcGIS" hidden>
   </div>
 </header>
 <main>
   <aside aria-label="Stasjonsscenario">
     <section class="section">
-      <div class="selection-field"><label for="terrain-layer">Kartlag</label><select id="terrain-layer" disabled><option value="">Værkart</option></select></div>
+      <div class="selection-field"><label for="terrain-layer">Kartlag</label><select id="terrain-layer" disabled><option value="">Usikkerhetskart</option></select></div>
     </section>
     <section class="section catalog-section">
       <details id="phenomena-picker" class="catalog-details"><summary>Værfenomen</summary>
       <div class="catalog-content">
       <fieldset id="phenomena" class="field phenomena" disabled>
         <label><input type="checkbox" data-phenomenon value="temperature">Temperatur</label>
-        <label><input type="checkbox" data-phenomenon value="wind">Vindhastighet</label>
+        <!--<label><input type="checkbox" data-phenomenon value="wind">Vindhastighet</label>
         <label><input type="checkbox" data-phenomenon value="precipitation">Nedbør</label>
         <label><input type="checkbox" data-phenomenon value="snow">Snødybde</label>
         <label><input type="checkbox" data-phenomenon value="humidity">Luftfuktighet</label>
-        <label><input type="checkbox" data-phenomenon value="road_temperature">Vegbanetemperatur</label>
+        <label><input type="checkbox" data-phenomenon value="road_temperature">Vegbanetemperatur</label>-->
         <div id="layers-note" class="data-note" hidden></div>
       </fieldset>
+      <hr>
+      <div class="field"><label class="road-toggle"><input id="road-corridor" type="checkbox">Kartlag langs veger</label></div>
+      <div class="field"><label for="road-distance">Vis kartlag </label><div class="input-wrap"><input id="road-distance" type="number" min="0" max="5000" step="50" value="500"><span>m langs veg</span></div></div>
       <div id="class-definition" class="data-note" hidden></div>
       </div></details>
     </section>
@@ -180,23 +215,28 @@
     <section id="road-panel" class="section catalog-section" aria-label="Vegnett og usikkerhet langs veg">
       <details id="road-picker" class="road-filters catalog-details"><summary>Vegnett</summary>
         <div class="catalog-content">
+        <fieldset><div class="road-options">
+          <label class="road-toggle"><input id="road-show" type="checkbox" checked>Vis vegnett</label>
+        </div></fieldset>
+        <fieldset><div class="road-options" style="grid-template-columns:1fr">
+          <label class="road-toggle"><input id="road-score-5" type="checkbox" disabled>Vis vegscoreklasse 1 <span class="key-dot" style="background:#e6007e" aria-hidden="true"></span></label>
+          <label class="road-toggle"><input id="road-score-4" type="checkbox" disabled>Vis vegscoreklasse 2 <span class="key-dot" style="background:#f58231" aria-hidden="true"></span></label>
+        </div></fieldset>
+        <hr>
         <fieldset><div id="road-categories" class="road-options">Laster vegnett</div></fieldset>
-        <fieldset><legend id="road-class-label">VS_Total-klasser</legend><div id="road-classes" class="road-options road-classes"></div></fieldset>
         <div class="field"><label for="road-reference">Vegnavn</label><input id="road-reference" type="text" maxlength="30" placeholder="E6 eller Rv3"></div>
-        <div class="field"><label class="road-toggle"><input id="road-corridor" type="checkbox">Værkart langs valgte veger</label></div>
-        <div class="field"><label for="road-distance">Korridoravstand</label><div class="input-wrap"><input id="road-distance" type="number" min="0" max="5000" step="50" value="1000"><span>m</span></div></div>
         </div>
       </details>
-      <div class="catalog-tools"><label class="road-toggle"><input id="road-show" type="checkbox">Vis</label><button id="road-download" class="icon-button" title="Last ned viste vegenker som GeoJSON" aria-label="Last ned viste veglenker som GeoJSON" disabled><i data-lucide="download"></i></button></div>
+      <div class="catalog-tools"><button id="road-download" class="icon-button" title="Last ned viste vegenker som GeoJSON" aria-label="Last ned viste veglenker som GeoJSON" hidden><i data-lucide="download" hidden></i></button></div>
       <div id="road-status" class="road-status" role="status" hidden></div>
-      <ol id="road-ranking" class="road-ranking" aria-label="Viste veglenker med høyest modellert feil" hidden></ol>
     </section>
     <section class="section">
-      <details id="station-picker" class="catalog-details"><summary>Værstasjoner <span class="catalog-count" id="network-count">—</span></summary>
+      <details id="station-picker" class="catalog-details"><summary>Målepunkter <span class="catalog-count" id="network-count">—</span></summary>
       <div class="catalog-content">
-      <div class="field"><label for="network">Stasjonsnett</label><select id="network" disabled><option value="frost">Alle værstasjoner</option><option value="svv">Vegværstasjoner</option><option value="empty">Tomt nett</option></select></div>
+      <div class="field"><label for="network" hidden>Velg nettverk for målepunkter</label><select id="network" disabled><option value="frost">Alle målepunkter</option><option value="svv">Vegvær-målepunkter</option><option value="svv_met">Vegvær- + MET-målepunkter</option><option value="empty">Tomt nett</option></select></div>
       <label class="road-toggle data-note"><input id="station-move-mode" type="checkbox" autocomplete="off">Flyttemodus</label>
-      <label class="road-toggle data-note"><input id="station-calculation-points" type="checkbox" checked>Vis beregningspunkter</label>
+      <label class="road-toggle data-note"><input id="station-calculation-points" type="checkbox">Vis beregningspunkter</label>
+      <div id="station-radius-note" class="data-note" hidden></div>
       <div id="calculation-progress" class="data-note" role="status" hidden></div>
       <div hidden>
       <div class="field"><label for="station-since">Stasjonsdata siden</label><input id="station-since" type="date"></div>
@@ -213,22 +253,23 @@
       </div></details>
     </section>
     <section class="section">
-      <div id="comparison-tabs" class="comparison-tabs" role="tablist" aria-label="Sammenligning">
-        <button id="comparison-baseline" role="tab" data-comparison="baseline" aria-selected="false" aria-controls="comparison-panel" tabindex="-1">Alle endringer</button>
-        <button id="comparison-selected" role="tab" data-comparison="selected" aria-selected="true" aria-controls="comparison-panel" tabindex="0">Valgt stasjon</button>
-      </div>
-      <div id="comparison-panel" role="tabpanel" aria-labelledby="comparison-selected">
-      <div class="selection-field"><label for="selected-station">Valgt stasjon</label><div class="station-control"><select id="selected-station" disabled><option value="">Velg en stasjon</option></select><button id="remove-frost" class="icon-button" title="Fjern valgt Frost-stasjon fra scenariet" aria-label="Fjern valgt Frost-stasjon fra scenariet" disabled><i data-lucide="trash-2"></i></button><button id="restore-frost" class="icon-button" title="Gjenopprett opprinnelig Frost-nett" aria-label="Gjenopprett opprinnelig Frost-nett" hidden disabled><i data-lucide="undo-2"></i></button></div></div>
-      <div id="frost-edit-status" class="data-note" hidden></div>
-      <div id="selected-description" class="data-note">Forskjell med og uten valgt stasjon</div>
+      <div id="comparison-tabs" class="comparison-tabs">
+        <button id="comparison-baseline" type="button" aria-pressed="false" title="Sammenlign alle endringer med grunnnettet">Se alle endringer i usikkerhet</button>
       </div>
     </section>
     <section class="section">
-      <div class="section-top"><h2>Egne forslag <span class="count" id="manual-count">0</span></h2><div class="tools"><button id="undo" class="icon-button" title="Angre siste stasjon" aria-label="Angre siste stasjon" disabled><i data-lucide="undo-2"></i></button><button id="reset" class="icon-button" title="Fjern alle egne forslag" aria-label="Fjern alle egne forslag" disabled><i data-lucide="rotate-ccw"></i></button></div></div>
+      <div class="section-top"><h2>Nye målepunkt lagt til. <span class="count">Antall: </span><span class="count" id="manual-count">0</span></h2><div class="tools"><button id="undo" class="icon-button" title="Angre siste stasjon" aria-label="Angre siste stasjon" disabled><i data-lucide="undo-2"></i></button><button id="reset" class="icon-button" title="Fjern alle egne forslag" aria-label="Fjern alle egne forslag" disabled><i data-lucide="rotate-ccw"></i></button></div></div>
       <ol id="stations" class="station-list"></ol>
-      <div id="empty" class="empty">Ingen egne stasjonsforslag</div>
+      <!-- <div id="empty" class="empty" hidden>Ingen egne stasjonsforslag</div> -->
     </section>
-    <section class="section"><div id="rmse-filter" class="field"><label for="rmse-min">Skjul farger under <output id="rmse-min-value" for="rmse-min" aria-label="Av - alle farger vises" title="Av - alle farger vises"></output></label><input id="rmse-min" type="range" min="0" max="0" step="any" value="0" disabled></div><div class="field"><label for="opacity">Kartlagets gjennomsiktighet</label><input id="opacity" type="range" min="0" max="100" step="5" value="15"></div></section>
+    <section class="section">
+      <div id="rmse-filter" class="field"><label for="rmse-min">Skjul farger under <output id="rmse-min-value" for="rmse-min"></output></label><input id="rmse-min" type="range" min="0" max="99" step="1" value="0" disabled><output id="rmse-cutoff-text" for="rmse-min"></output></div><div class="field"><label for="opacity">Kartlagets gjennomsiktighet</label><input id="opacity" type="range" min="0" max="100" step="5" value="15"></div>
+    </section>
+    <footer class="panel-footer">
+      <p>Tilbakemeldinger sendes til <a href="mailto:vegvar@vegvesen.no">vegvar@vegvesen.no</a></p>
+      <hr>
+      <p>Versjon 1.0</p>
+    </footer>
   </aside>
   <section class="map-region" aria-label="Kart over norske værstasjoner">
     <div class="loading-bar"></div>
@@ -237,18 +278,196 @@
       <div class="modes" role="group" aria-label="Kartlag">
         <button data-mode="uncertainty" aria-pressed="true">Usikkerhet</button>
         <button data-mode="baseline" aria-pressed="false">Grunnett</button>
-        <button data-mode="reduction" aria-pressed="false">Reduksjon</button>
+        <button data-mode="reduction" aria-pressed="false">Endring i usikkerhet</button>
       </div>
-      <div class="map-tools"><button id="station-visibility" class="icon-button" aria-pressed="true">Skjul stasjoner</button><button id="fit" class="icon-button" title="Vis hele Norge" aria-label="Vis hele Norge"><i data-lucide="scan"></i></button></div>
+      <div class="map-tools"><button id="help-open" type="button" class="icon-button" aria-haspopup="dialog" aria-controls="help-dialog">Hjelp</button><button id="station-visibility" class="icon-button" aria-pressed="true">Skjul stasjoner</button><button id="fit" class="icon-button" title="Vis hele Norge" aria-label="Vis hele Norge"><i data-lucide="scan"></i></button></div>
     </div>
     <div id="message" class="message" role="alert" hidden><span></span><button title="Lukk melding" aria-label="Lukk melding"><i data-lucide="x"></i></button></div>
     <div class="legend">
       <div class="legend-title" id="legend-title">Temperatur</div>
+      <div id="legend-numbers" class="legend-numbers" hidden></div>
       <div id="ramp" class="ramp"></div><div class="ticks"><span id="low">Mindre usikkert</span><span id="middle" hidden>0</span><span id="high">Mer usikkert</span></div>
       <details id="climate-legend" hidden style="max-width:260px;font-size:11px;line-height:1.6"><summary style="cursor:pointer">Vis klimasoner</summary><div id="climate-legend-items" style="max-height:180px;overflow:auto"></div></details>
     </div>
   </section>
 </main>
+<dialog id="help-dialog" aria-labelledby="help-title">
+  <div class="help-layout">
+    <div class="help-header">
+      <h2 id="help-title">Hjelp til Værnett</h2>
+      <button id="help-close" type="button" class="icon-button" aria-label="Lukk hjelp" autofocus>Lukk</button>
+    </div>
+    <div id="help-content" class="help-content">
+<h1>Værnett – brukerdokumentasjon</h1>
+
+  <h2>Kom i gang med Værnett</h2>
+  <ol>
+    <li>Åpne programmet / åpne nettsiden.</li>
+    <li>Når man åpner Værnett ser man et kart og et panel på venstre side. Som standardinnstillinger er det usikkerhetskart for temperatur og vegværstasjoner som er valgt og som vises i kartet.</li>
+    <li>Zoom inn med musepekeren på området du ønsker å undersøke.</li>
+    <li>Klikk et sted langs vei i kartet for å legge til en ny stasjon.</li>
+    <li>Velg hvilke sensorer du ønsker å legge til på stasjonen, deretter trykk bekreft.</li>
+    <li>Velg <strong>Endring i usikkerhet</strong> for å se effekten.</li>
+    <li>Dersom du ønsker å flytte på stasjoner som er lagt inn, eller allerede eksisterende stasjoner, velg <strong>Værstasjoner</strong> i panelet til venstre og huk av for <strong>flyttemodus</strong>.</li>
+    <li>Du kan nå flytte stasjonene for å se reduksjonen i usikkerheten andre steder.</li>
+    <li>For å skifte mellom usikkerhetskart, vegklimasoner, kart for høyde over havet og plasseringsgevinst velger du kartlag i rullegardinmenyen øverst i panelet på venstre side.</li>
+    <li>Lagre scenarioet dersom du ønsker å fortsette senere eller dele analysen.</li>
+    <li>Utfyllende informasjon om de andre funksjonalitetene finnes i denne dokumentasjonen.</li>
+  </ol>
+
+  <h2>Om Værnett</h2>
+  <p class="lead">Værnett er et verktøy for å vurdere plassering av værstasjoner og målepunkter langs vegnettet.</p>
+  <p>Verktøyet gir beslutningsstøtte når du skal undersøke hvor godt dagens stasjonsnett representerer temperatur-, klima- og vegforhold i ulike områder. Du kan også teste hvordan stasjonsnettet påvirkes dersom du <strong>legger til, flytter eller fjerner værstasjoner</strong>.</p>
+  <p>Du kan blant annet bruke Værnett til å:</p>
+  <ul>
+    <li>undersøke hvor dagens værstasjoner gir god eller begrenset dekning</li>
+    <li>finne områder hvor en ny værstasjon kan være nyttig</li>
+    <li>teste alternative plasseringer</li>
+    <li>sammenligne dagens stasjonsnett med et endret scenario</li>
+    <li>undersøke klima, terreng og andre forhold som kan være relevante for plasseringen</li>
+    <li>lagre og dele et scenario med andre</li>
+  </ul>
+  <p><strong>Slik kommer du i gang:</strong> Klikk i kartet for å foreslå plasseringen av en ny stasjon. Bruk panelet til venstre for å velge kartlag og hvilke analyser du ønsker å se.</p>
+  <div class="notice"><strong>Viktig:</strong> Værnett er et beslutningsstøtteverktøy. Kart og beregninger bør alltid vurderes sammen med lokalkunnskap, operative behov og andre relevante forhold.</div>
+
+  <h2>Kartlag</h2>
+  <p>Øverst i panelet kan du velge hvilket kartlag som skal vises. Kartlagene gir forskjellige typer informasjon som kan brukes når du vurderer eksisterende værstasjoner eller plassering av nye målepunkter.</p>
+
+  <h3>Usikkerhetskart</h3>
+  <p>Kartet svarer på spørsmålet: <strong>Hvor godt beskriver et målepunkt temperaturen på nærliggende områder?</strong> Modellen tar høyde for avstand, høydeforskjeller og terreng, så den nærmeste stasjonen er ikke alltid den beste.</p>
+  <p><strong>Slik leser du tallet:</strong> Karttallet viser minste spenn det er i døgnmiddeltemperatur på det angitte området i forhold til det målepunktet som representerer området best i 95 % av dagene. Det vil si at 5 % av dagene, eller 18 dager i året, avviker døgnmiddeltemperaturen mer enn karttallet.</p>
+  <p><strong>Eksempel – Hva betyr 2 °C på kartet?</strong> Hvis kartet viser 2 °C langs en vegstrekning, og målepunktet som representerer vegstrekningen best måler 5 °C i døgnmiddel, gir det et anslått intervall på 3–7 °C langs vegen. Modellen anslår at døgnmidlene på de to stedene skiller seg med høyst 2 °C på omtrent 95 % av dagene. På de øvrige dagene er forskjellen større.</p>
+  <p>Blått betyr at karttallet er under 1 °C, hvitt at det er 1 °C, og rødt at det er over 1 °C. Verdier på 3 °C og høyere vises med samme mørkerøde farge.</p>
+  <p>Anslaget bygger på beregnede seNorge-temperaturer fra 1996–2025. Det beskriver forskjellen mellom to steder, ikke målefeilen på stasjonen, og er ingen garanti for en bestemt dag.</p>
+  <div class="tip">Hold <strong>Alt</strong> inne og klikk i kartet for å se hvilke målepunkter som representerer området best.</div>
+
+  <h3>Høyde over havet</h3>
+  <p>Kartlaget viser beregnet høyde over havet og kan brukes for å se <strong>terreng- og høydeforskjeller</strong> i området som vurderes.</p>
+  <p>Dette kan være nyttig fordi høyde og terreng kan ha stor betydning for lokale temperatur- og værforhold. Terrenggrunnlaget har en oppløsning på <strong>50 meter</strong>.</p>
+
+  <h3>Vegklimasoner</h3>
+  <p><strong>Hva viser kartet?</strong></p>
+  <p>Vegklimasonekartet deler Norge inn i <strong>åtte vegklimasoner</strong> basert på klimatiske forhold som er særlig relevante for veg og vinterdrift. Kartet gjør det enklere å se hvordan klimaet varierer langs vegnettet, og hvilke typer klima dagens værstasjoner representerer.</p>
+  <p>Kartet kan for eksempel brukes til å undersøke om en bestemt type vegklima:</p>
+  <ul><li>allerede er godt representert av eksisterende værstasjoner</li><li>er svakt representert</li><li>mangler representasjon</li><li>ligger i en overgang mellom ulike klimaforhold</li></ul>
+  <p>Vegklimasonene beskriver <strong>langsiktige klimatiske forskjeller</strong>. Kartet sier derfor ikke noe om været på et bestemt tidspunkt.</p>
+  <p><strong>De åtte vegklimasonene</strong></p>
+  <ul><li>Vinterfuktig høylandsklima</li><li>Kjølig høylandsklima</li><li>Sterkt maritimt klima</li><li>Temperert innlandsklima</li><li>Kjølig maritimt klima</li><li>Kaldt høyfjellsklima</li><li>Sterkt kontinentalt klima</li><li>Fuktig overgangsklima</li></ul>
+  <p><strong>Hvordan er kartet laget?</strong></p>
+  <p>Vegklimasonene er beregnet ut fra:</p>
+  <ul><li>vintertemperatur</li><li>forskjellen mellom sommer- og vintertemperatur</li><li>vinternedbør</li><li>antall frostdager</li><li>høyde over havet</li><li>påvirkning fra kysten</li></ul>
+  <p>Norge er analysert i et rutenett på <strong>1 km²</strong>. Områder med lignende klimatiske egenskaper er deretter gruppert sammen til de åtte vegklimasonene.</p>
+  <p>Sonene representerer områder med <strong>relativt like klimatiske egenskaper</strong>. Grensene mellom sonene bør derfor forstås som overganger, ikke som skarpe klimatiske skiller.</p>
+  <p>Kartet kan brukes som ett av flere grunnlag for å finne områder hvor nye tradisjonelle værstasjoner eller IoT-målepunkter kan gi et mer representativt stasjonsnett.</p>
+  <p><strong>Se informasjon om en vegklimasone:</strong> Velg <strong>Vegklimasoner</strong> som kartlag og klikk på en klimasone i kartet. Da kan du se gjennomsnittsverdier for klimaegenskapene som kjennetegner sonen.</p>
+
+  <h3>Plasseringsgevinst</h3>
+  <p>Kartet svarer på spørsmålet: <strong>Hvor bør vi sette ett nytt målepunkt med temperatursensor for å få mest mulig nytte langs vegene?</strong> Tallet på et sted viser gevinsten av å plassere målepunktet der, sammenlignet med grunnettet du har valgt under Målepunkter. Beregningen teller arealet inntil 200 m fra riks- og fylkesveger og høyst 100 km fra det nye målepunktet.</p>
+  <p><strong>Slik leser du tallet:</strong> Gevinsten øker både når usikkerheten faller mer og når forbedringen dekker et større areal. I hver rute multipliseres reduksjonen i karttallet (°C) med arealet langs veg i ruten (km²). Bidragene summeres, og derfor oppgis gevinsten i <strong>°C·km²</strong>, ikke i grader eller kilometer veg.</p>
+  <p><strong>Eksempel – Hva betyr en gevinst på 10 °C·km²?</strong> Hvis et nytt målepunkt fører til at usikkerheten går fra 2 °C til 1 °C over 10 km², gir det en gevinst på 10 °C·km². En reduksjon på 0,5 °C over 20 km² gir samme gevinst.</p>
+  <p><strong>Tomt nett:</strong> Uten målepunkter finnes det ikke et grunnett å sammenligne med. Beregningen bruker derfor ±1 °C som en valgt referanse, ikke som et krav eller som målt usikkerhet. Bare areal der det nye målepunktet gir et smalere anslått intervall enn referansen, bidrar til gevinsten.</p>
+  <p>Plasseringsgevinst er forhåndsberegnet for hvert grunnett og oppdateres ikke når du legger til egne forslag.</p>
+
+  <h2>Værfenomen og visning langs veg</h2>
+  <p>Under <strong>Værfenomen</strong> velger du hvilken værparameter som skal analyseres. I denne versjonen velger du <strong>Temperatur</strong> for å vise temperaturmodellens usikkerhet. Temperatur er valgt som standard.</p>
+  <h3>Vis kartlaget langs veg</h3>
+  <p>Velg <strong>Kartlag langs veger</strong> dersom du bare ønsker å vise beregningene langs vegnettet. Du kan angi hvor stort område rundt vegen som skal inkluderes. Standardverdien er <strong>500 meter</strong>.</p>
+
+  <h2>Dekningsgrad</h2>
+  <p><strong>Hva viser dekningsgraden?</strong></p>
+  <p>Dekningsgrad viser <strong>hvor godt ulike klimatiske forhold langs vegnettet er representert av eksisterende værstasjoner</strong>.</p>
+  <p>Beregningen kombinerer:</p>
+  <ul><li>vegklimasonene</li><li>vegnettet</li><li>plasseringen av eksisterende værstasjoner</li></ul>
+  <p>Analysen ser dermed ikke bare på avstanden til nærmeste værstasjon. Den undersøker også <strong>om tilsvarende klimatiske forhold langs vegnettet allerede er representert i stasjonsnettet</strong>.</p>
+  <p>Kartlaget kan bidra til å finne:</p>
+  <ul><li>klimatiske områder som mangler representasjon</li><li>viktige overgangssoner</li><li>geografiske hull i stasjonsnettet</li><li>områder som allerede er godt representert</li></ul>
+  <p><strong>Hvordan kan kartlaget brukes?</strong></p>
+  <p>Dekningsgrad kan brukes som et grunnlag for å vurdere <strong>hvor det kan være behov for nye målepunkter</strong>. Kartlaget kan også være nyttig når du vurderer om behovet bør dekkes av en <strong>tradisjonell værstasjon eller et IoT-målepunkt</strong>.</p>
+  <p>Det er fem forskjellige kategorier fra godt representert til svært interessant kandidatområde.</p>
+  <h3>Tradisjonell værstasjon</h3>
+  <p>En tradisjonell værstasjon kan være særlig aktuell dersom et større klimatisk område eller en viktig overgangssone mangler representasjon i dagens stasjonsnett. En slik stasjon kan fungere som et mer omfattende og stabilt referansepunkt.</p>
+  <h3>IoT-målepunkt</h3>
+  <p>Et IoT-målepunkt kan være aktuelt der den overordnede klimatiske representasjonen allerede er god, men hvor det er behov for:</p>
+  <ul><li>tettere geografisk dekning</li><li>informasjon om lokale variasjoner</li><li>overvåking av et utsatt punkt</li><li>supplerende målinger mellom tradisjonelle værstasjoner</li></ul>
+  <p>IoT-målepunkter kan dermed brukes som <strong>supplement til det tradisjonelle stasjonsnettet</strong>.</p>
+  <div class="notice"><strong>Kjent begrensning i første versjon:</strong> Enkelte områder kan bli vist som svært interessante kandidatområder selv om det finnes en eksisterende værstasjon i området som ikke er tatt med i beregningen. Dette fordi stasjonen har havnet utenfor beregningsområdet. Kontroller derfor alltid eksisterende stasjoner før du konkluderer med at området mangler dekning.</div>
+
+  <h2>Kuldehull</h2>
+  <p>Kartlaget <strong>Kuldehull</strong> viser terrengformasjoner hvor kald luft kan samle seg. Slike områder kan ha andre temperaturforhold enn omgivelsene.</p>
+  <h3>Filtrer kuldehull</h3>
+  <p>Med <strong>Dypere enn</strong> kan du velge å bare vise kuldehull som er dypere enn en angitt verdi. Velg <strong>Bare usikkerhet i kuldehull</strong> dersom du kun ønsker å vise usikkerhetskartet innenfor de valgte kuldehullene.</p>
+  <h3>Undersøk et kuldehull</h3>
+  <p>Hold inne <strong>Ctrl</strong> og klikk på kuldehullet i kartet. På Mac bruker du <strong>Cmd + klikk</strong>.</p>
+
+  <h2>Fylker</h2>
+  <p>Under <strong>Fylker</strong> velger du hvilke fylker du vil undersøke. Du kan:</p>
+  <ul><li>velge ett eller flere fylker</li><li>velge alle fylker</li><li>fjerne alle valgte fylker</li></ul>
+  <p>Dette er nyttig dersom du ønsker å avgrense analysen til et bestemt geografisk område.</p>
+
+  <h2>Vegnett</h2>
+  <p>Velg <strong>Vis</strong> for å vise vegnettet i kartet. Du kan velge mellom:</p>
+  <ul><li>europaveg</li><li>riksveg</li><li>fylkesveg</li></ul>
+
+  <h2>Vegscore</h2>
+  <p>Vegscore fremhever vegstrekninger der ulike forhold kan gjøre det særlig interessant å følge vær- og føreforhold. Velg <strong>Vis vegscore</strong> for å slå på kartlaget.</p>
+  <p>Vegscoren bygger på seks hovedgrupper:</p>
+  <ol>
+    <li><strong>Vegbase</strong> – blant annet vegkategori og vinterdriftsklasse</li>
+    <li><strong>Eksponering</strong> – blant annet høyde, bru, nærhet til vann og omkringliggende terreng</li>
+    <li><strong>Kjøreforhold</strong> – blant annet helning og tunnelåpninger</li>
+    <li><strong>Naturfare</strong> – faretype og hyppighet</li>
+    <li><strong>Skred</strong> – hyppighet</li>
+    <li><strong>Værutsatt veg</strong> – blant annet hvor ofte vegen er stengt</li>
+  </ol>
+  <p>I dagens scoringsmodell er parameterne vektet likt. <strong>Klikk på en veglenke</strong> for å se hvilke forhold som har gitt poeng til den aktuelle strekningen.</p>
+  <div class="notice"><strong>Merk:</strong> I en senere versjon er målet at brukeren selv skal kunne justere vektingen i scoringsmodellen. Dette er ikke tilgjengelig i versjon 1.</div>
+
+  <h2>Værstasjoner</h2>
+  <p>Under <strong>Værstasjoner</strong> velger du hvilket stasjonsnett du ønsker å arbeide med. Du kan velge:</p>
+  <ul><li><strong>Alle værstasjoner</strong></li><li><strong>Vegværstasjoner</strong></li><li><strong>MET- og SVV-værstasjoner</strong></li><li><strong>Tomt stasjonsnett</strong></li></ul>
+  <p>Velger du <strong>Tomt stasjonsnett</strong>, kan du bygge opp et nytt, tenkt stasjonsnett fra bunnen av og undersøke hvordan ulike plasseringer påvirker resultatene.</p>
+  <h3>Legg til en stasjon</h3>
+  <p>Klikk på ønsket plassering i kartet for å foreslå en ny stasjon. Usikkerhetskartet beregnes på nytt slik at du kan undersøke hvilken effekt den nye plasseringen har.</p>
+  <h3>Flytt en stasjon</h3>
+  <p>Slå på <strong>Flyttemodus</strong> og dra stasjonen til ønsket plassering.</p>
+  <h3>Beregningspunkter</h3>
+  <p>Velg <strong>Vis beregningspunkter</strong> for å se terrengpunktene som brukes i beregningene.</p>
+
+  <h2>Sammenligne endringer i stasjonsnettet</h2>
+  <h3>Se alle endringer i usikkerhet</h3>
+  <p>Denne knappen bestemmer <strong>hva det endrede scenariet sammenlignes med</strong>. Når <strong>Se alle endringer i usikkerhet</strong> er aktivert, er knappen grønn. Hele det endrede scenariet sammenlignes da med det opprinnelige stasjonsnettet. Når funksjonen er slått av, vises effekten av bare den valgte stasjonen.</p>
+  <p>Velg <strong>Endring i usikkerhet</strong> øverst i kartet for å se resultatet av sammenligningen.</p>
+
+  <h2>Nye målepunkter lagt til</h2>
+  <p>Her vises stasjonene eller målepunktene du selv har lagt til i kartet. Velg et forslag i listen for å undersøke det nærmere.</p>
+  <p>Du kan også bruke:</p>
+  <ul><li><strong>Fjern alle egne forslag</strong> for å fjerne alle nye plasseringer</li><li><strong>Angre siste stasjon</strong> for å fjerne den siste plasseringen</li></ul>
+
+  <h2>Kartvisning</h2>
+  <p>Øverst til venstre i kartet finner du tre visninger:</p>
+  <h3>Usikkerhet</h3><p>Viser beregnet usikkerhet for stasjonene i det aktive scenariet.</p>
+  <h3>Grunnett</h3><p>Viser usikkerheten for det opprinnelige stasjonsnettet.</p>
+  <h3>Endring i usikkerhet</h3><p>Viser hvordan usikkerheten endres mellom grunnettet og den valgte sammenligningen. Dette gjør det mulig å se <strong>hvor mye en foreslått endring faktisk påvirker stasjonsnettet</strong>.</p>
+  <h3>Tilpass kartvisningen</h3>
+  <p>Med <strong>Skjul farger under</strong> nederst i panelet på venstre side kan du filtrere bort lave usikkerhetsverdier. Du kan også justere <strong>gjennomsiktigheten</strong> for å gjøre bakgrunnskartet mer eller mindre synlig.</p>
+  <p>Velg <strong>Skjul stasjoner</strong> for å skjule stasjonssymbolene i kartet. Stasjonene fjernes ikke fra beregningen. Velg <strong>Hjelp</strong> for å åpne denne dokumentasjonen.</p>
+
+  <h2>Lagre og dele</h2>
+  <h3>Lagre scenario</h3>
+  <p><strong>Lagre scenario</strong> lagrer stasjonsendringer og innstillinger i en JSON-fil. Scenarioet kan senere åpnes igjen med <strong>Åpne scenario</strong>. Dette er nyttig dersom du ønsker å fortsette analysen senere eller dele et scenario med en annen bruker av Værnett.</p>
+  <h3>Lagre kart</h3>
+  <p><strong>Lagre kart</strong> oppretter et interaktivt, skrivebeskyttet HTML-kart. Dette egner seg når du ønsker å <strong>dele resultatet med andre uten at de trenger å gjenskape analysen i Værnett</strong>.</p>
+
+  <h2>Tilbakemelding</h2>
+  <p>Har du funnet en feil, har forslag til forbedringer eller ønsker å stille spørsmål om Værnett? Send tilbakemeldingen til <a href="mailto:vegvar@vegvesen.no"><strong>vegvar@vegvesen.no</strong></a>.</p>
+  <p>Det er nyttig om meldingen inneholder:</p>
+  <ul><li>navn og eventuell tilhørighet, for eksempel fylke eller kontraktsområde</li><li>hva tilbakemeldingen gjelder</li><li>en kort beskrivelse av problemet eller forslaget</li><li>relevante skjermbilder</li><li>eventuell kontaktinformasjon</li></ul>
+  <p>Dersom tilbakemeldingen gjelder et bestemt scenario, bruk gjerne <strong>Lagre scenario</strong> eller <strong>Lagre kart</strong> og legg ved JSON- eller HTML-filen. Det gjør det enklere å undersøke saken.</p>
+  <p>Du kan for eksempel merke henvendelsen med:</p>
+  <ul><li><strong>Feil i Værnett</strong> – feil i selve løsningen</li><li><strong>Feil i værstasjonsdata</strong> – manglende eller feil informasjon om værstasjoner</li><li><strong>Feil i kartvisning</strong> – problemer med kart eller kartfunksjoner</li><li><strong>Forslag til forbedring</strong> – forslag til hvordan Værnett kan bli bedre</li><li><strong>Innspill eller spørsmål</strong> – øvrige forslag og spørsmål</li></ul>
+  </div>
+  </div>
+</dialog>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
 <script src="/station_app.js"></script>

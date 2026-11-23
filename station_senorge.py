@@ -137,3 +137,21 @@ class SeNorgePairModel:
         if not np.isfinite(result).all():
             raise ValueError("seNorge-modellen ga ikke-endelige prediksjoner")
         return result
+
+
+def p95_reference_values(model, source, target, winners, maximum_distance_m):
+    """Score only the station already selected by the RMSE reference for each cell."""
+    values = np.full(len(winners), np.nan, dtype=np.float32)
+    cells = np.flatnonzero(winners >= 0)
+    for start in range(0, len(cells), 32_768):
+        ids = cells[start:start + 32_768]
+        stations = winners[ids]
+        inputs, identical, _ = model.pair_inputs(source, target, stations, ids)
+        supported = inputs[:, 0] <= maximum_distance_m
+        if supported.any():
+            predicted = np.maximum(model.model.predict(inputs[supported]), 0)
+            predicted[identical[supported]] = 0
+            if not np.isfinite(predicted).all():
+                raise ValueError("P95-modellen ga ikke-endelige prediksjoner")
+            values[ids[supported]] = predicted
+    return values

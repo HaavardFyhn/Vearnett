@@ -211,6 +211,25 @@ class KuldehullLayer:
         output.seek(0)
         return output
 
+    @staticmethod
+    def viewport_image(rendered, engine, viewport):
+        south, west = engine.bounds[0]
+        north, east = engine.bounds[1]
+        transformer = Transformer.from_crs(4326, 3857, always_xy=True)
+        left, bottom = transformer.transform(west, south)
+        right, top = transformer.transform(east, north)
+        view_west, view_south, view_east, view_north = viewport["bounds"]
+        view_left, view_bottom = transformer.transform(view_west, view_south)
+        view_right, view_top = transformer.transform(view_east, view_north)
+        extent = ((view_left - left) / (right - left) * rendered.width,
+                  (top - view_top) / (top - bottom) * rendered.height,
+                  (view_right - left) / (right - left) * rendered.width,
+                  (top - view_bottom) / (top - bottom) * rendered.height)
+        return rendered.transform(
+            (viewport["width"], viewport["height"]), Image.Transform.EXTENT, extent,
+            resample=Image.Resampling.NEAREST,
+        )
+
     def clip(self, image, engine, minimum_depth, viewport=None):
         image.seek(0)
         with Image.open(image) as source:
@@ -219,20 +238,7 @@ class KuldehullLayer:
         north, east = engine.bounds[1]
         bounds = (west, south, east, north)
         if viewport is not None:
-            transformer = Transformer.from_crs(4326, 3857, always_xy=True)
-            left, bottom = transformer.transform(west, south)
-            right, top = transformer.transform(east, north)
-            view_west, view_south, view_east, view_north = viewport["bounds"]
-            view_left, view_bottom = transformer.transform(view_west, view_south)
-            view_right, view_top = transformer.transform(view_east, view_north)
-            extent = ((view_left - left) / (right - left) * rendered.width,
-                      (top - view_top) / (top - bottom) * rendered.height,
-                      (view_right - left) / (right - left) * rendered.width,
-                      (top - view_bottom) / (top - bottom) * rendered.height)
-            rendered = rendered.transform(
-                (viewport["width"], viewport["height"]), Image.Transform.EXTENT, extent,
-                resample=Image.Resampling.NEAREST,
-            )
+            rendered = self.viewport_image(rendered, engine, viewport)
             bounds = viewport["bounds"]
         rgba = np.array(rendered)
         mask = self.mask(bounds, rgba.shape[1], rgba.shape[0], minimum_depth)

@@ -16,7 +16,7 @@ import pandas as pd
 from pyproj import Transformer
 
 from station_app import GreedySurfaces, Scenario, StationEngine, TERRAIN_LAYERS, create_app
-from station_weather import WeatherRegistry, exact_network, observation_stations, paired_predictions, save_exact_cache
+from station_weather import DIRECT_P95, WeatherRegistry, exact_network, observation_stations, paired_predictions, save_exact_cache
 from station_roads import RoadNetwork, normalize_reference, road_categories
 from greedy_400_stations_pruned import CACHE_KEYS, FEATURES, TERRAIN, feature_matrix, make_cache
 
@@ -39,7 +39,7 @@ class FakeEngine:
     def station(self, index):
         return dict(id=index, x=1000, y=0, lon=5, lat=60, elevation=10)
 
-    def render(self, values, mode, *limits, cell_mask=None, display_size=None):
+    def render(self, values, mode, *limits, cell_mask=None, display_size=None, map_scale="log"):
         from PIL import Image
 
         buffer = BytesIO()
@@ -157,6 +157,12 @@ class TestHostingTests(unittest.TestCase):
         self.assertEqual(client.post("/api/action", base_url=origin, headers={"Origin": origin}, json=action).status_code, 200)
         self.assertEqual(client.post("/api/action", base_url=origin, headers={"Origin": "http://other-site"}, json=action).status_code, 403)
 
+    def test_help_dialog_embeds_the_user_documentation(self):
+        html = (Path(__file__).parent / "station_app.html").read_text(encoding="utf-8")
+        self.assertIn("<h1>Værnett – brukerdokumentasjon</h1>", html)
+        self.assertIn("<h2>Kartlag</h2>", html)
+        self.assertNotIn('src="/help"', html)
+
 
 class ScenarioTests(unittest.TestCase):
     def setUp(self):
@@ -165,6 +171,119 @@ class ScenarioTests(unittest.TestCase):
 
     def add(self):
         self.scenario.apply(dict(action="add", lon=5, lat=60))
+
+    def test_empty_temperature_reduction_uses_fixed_half_degree_reference_and_strict_cutoff(self):
+        engine = FakeWeatherEngine()
+        scenario = Scenario(engine)
+        scenario.apply(dict(action="network", value="empty"))
+        self.assertIsNone(scenario.change()[2])
+        scenario.apply(dict(action="add", lon=5, lat=60, sensors=["temperature"]))
+        with patch.object(engine, "prediction", return_value=np.array([.4, .5, .6], dtype=np.float32)):
+            after, before, reduction = scenario.change()
+            np.testing.assert_allclose(after, [.4, .5, .6])
+            np.testing.assert_array_equal(before, [.5, .5, .5])
+            np.testing.assert_allclose(reduction, [.1, 0, 0])
+            self.assertEqual(scenario.state()["empty_reference_rmse"], .5)
+            self.assertEqual(scenario.limits()[2], .5)
+        scenario.apply(dict(action="reset_defaults"))
+        self.assertEqual(scenario.empty_reference_rmse, .5)
+
+    def test_empty_reference_cannot_be_changed_by_scenario_actions(self):
+        scenario = Scenario(FakeWeatherEngine())
+        expected = scenario.change()[2]
+        revision = scenario.revision
+        for value in (.5, 5, 0, -1, np.inf, np.nan, True, None, "bad"):
+            with self.subTest(value=value), self.assertRaises((ValueError, TypeError)):
+                scenario.apply(dict(action="empty_reference", value=value))
+            self.assertEqual(scenario.revision, revision)
+            self.assertEqual(scenario.empty_reference_rmse, .5)
+            np.testing.assert_array_equal(scenario.change()[2], expected)
+
+    def test_empty_reference_api_uses_fixed_reduction_without_changing_uncertainty(self):
+        engine = FakeWeatherEngine()
+        client = create_app(engine).test_client()
+        client.post("/api/action", json=dict(action="network", value="empty"))
+        with patch.object(engine, "prediction", return_value=np.array([.2, .5, .8])), \
+                patch.object(engine, "render", wraps=engine.render) as render:
+            client.post("/api/action", json=dict(action="add", lon=5, lat=60))
+            self.assertEqual(client.get("/api/map.png?mode=reduction").status_code, 200)
+            np.testing.assert_allclose(render.call_args.args[0], [.3, 0, 0])
+            response = client.post("/api/action", json=dict(action="empty_reference", value=5))
+            self.assertEqual(response.status_code, 400, response.json)
+            self.assertEqual(client.get("/api/map.png?mode=reduction").status_code, 200)
+            np.testing.assert_allclose(render.call_args.args[0], [.3, 0, 0])
+            self.assertEqual(client.get("/api/map.png?mode=uncertainty").status_code, 200)
+            np.testing.assert_array_equal(render.call_args.args[0], [.2, .5, .8])
+
+    def test_empty_reference_render_hides_equal_higher_and_out_of_radius_cells(self):
+        from PIL import Image
+        from rasterio.transform import rowcol
+
+        engine = FakeWeatherEngine()
+        scenario = Scenario(engine)
+        scenario.apply(dict(action="network", value="empty"))
+        scenario.apply(dict(action="add", lon=5, lat=60))
+        raster = StationEngine.__new__(StationEngine)
+        raster.grid = pd.DataFrame(dict(x=[500000, 501000, 502000], y=[6700000] * 3))
+        raster.cell_m = 1000
+        raster.minimum, raster.maximum = .01, 6
+        raster._prepare_raster()
+        x, y = Transformer.from_crs(25833, 3857, always_xy=True).transform(
+            raster.grid.x.to_numpy(), raster.grid.y.to_numpy())
+        rows, columns = rowcol(raster.web_transform, x, y)
+        for predictions in ([.4, .5, .6], [.4, np.inf, np.nan]):
+            with self.subTest(predictions=predictions), patch.object(
+                    engine, "prediction", return_value=np.array(predictions, dtype=np.float32)):
+                scenario._change_key = None
+                with Image.open(StationEngine.render(raster, scenario.change()[2], "reduction", *scenario.limits())) as image:
+                    alpha = np.asarray(image)[rows, columns, 3]
+                    self.assertGreater(alpha[0], 0)
+                    np.testing.assert_array_equal(alpha[1:], [0, 0])
+
+    def test_direct_p95_empty_reference_applies_one_degree_to_preview_and_reduction_only(self):
+        engine = FakeWeatherEngine()
+        configs = [*engine.weather.available, dict(id=DIRECT_P95, phenomenon="temperature", kind="direct_p95",
+                                                   label="Temperature", metric="P95", unit="\u00b0C")]
+        with patch.object(engine.weather, "available", configs):
+            client = create_app(engine, initial_dataset=DIRECT_P95).test_client()
+            client.post("/api/action", json=dict(action="network", value="empty"))
+            predictions = np.array([.8, 1., 1.2], dtype=np.float32)
+            with patch.object(engine, "prediction", return_value=predictions), \
+                    patch.object(engine, "render", wraps=engine.render) as render:
+                response = client.post("/api/preview", json=dict(lon=5, lat=60, mode="reduction"))
+                self.assertEqual(response.status_code, 200)
+                np.testing.assert_allclose(render.call_args.args[0], [.2, 0, 0])
+                response = client.post("/api/action", json=dict(action="add", lon=5, lat=60))
+                self.assertEqual(response.json["empty_reference_rmse"], 1.)
+                self.assertEqual(client.get("/api/map.png?mode=reduction").status_code, 200)
+                np.testing.assert_allclose(render.call_args.args[0], [.2, 0, 0])
+                self.assertEqual(client.get("/api/map.png?mode=uncertainty").status_code, 200)
+                np.testing.assert_array_equal(render.call_args.args[0], predictions)
+
+    def test_empty_reference_preview_matches_committed_reduction(self):
+        engine = FakeWeatherEngine()
+        client = create_app(engine).test_client()
+        client.post("/api/action", json=dict(action="network", value="empty"))
+        with patch.object(engine, "prediction", return_value=np.array([.2, .5, .8])), \
+                patch.object(engine, "render", wraps=engine.render) as render:
+            response = client.post("/api/preview", json=dict(lon=5, lat=60, mode="reduction"))
+            self.assertEqual(response.status_code, 200)
+            np.testing.assert_allclose(render.call_args.args[0], [.3, 0, 0])
+        self.assertEqual(client.get("/api/state").json["stations"], [])
+
+    def test_empty_reference_includes_all_proposals_not_just_selected_station(self):
+        engine = FakeWeatherEngine()
+        scenario = Scenario(engine)
+        scenario.apply(dict(action="network", value="empty"))
+        scenario.apply(dict(action="add", lon=5, lat=60))
+        with patch.object(engine, "snap", return_value=2):
+            scenario.apply(dict(action="add", lon=6, lat=61))
+        with patch.object(engine, "prediction", side_effect=lambda index, dataset: np.array(
+                [.4, .6, .6] if index == 1 else [.6, .4, .6], dtype=np.float32)):
+            scenario.apply(dict(action="select", kind="manual", index=1))
+            np.testing.assert_allclose(scenario.change()[2], [.1, .1, 0])
+            scenario.apply(dict(action="select", kind="manual", index=2))
+            np.testing.assert_allclose(scenario.change()[2], [.1, .1, 0])
 
     def test_empty_weather_selection_preserves_proposals_and_can_be_reselected(self):
         scenario = Scenario(FakeWeatherEngine())
@@ -415,6 +534,44 @@ class ScenarioTests(unittest.TestCase):
             self.assertTrue(((pixels[:, :, 2] > pixels[:, :, 0]) & visible).any())
             self.assertTrue(((pixels[:, :, 0] > pixels[:, :, 2]) & visible).any())
 
+    def test_viewport_coastline_clipping_preserves_pixels_holes_and_empty_views(self):
+        from PIL import Image
+        from pyproj import Transformer
+        from rasterio.features import geometry_mask
+        from shapely.geometry import MultiPolygon, Polygon, box
+
+        engine = StationEngine.__new__(StationEngine)
+        engine.grid = self.engine.grid
+        engine.cell_m = 1000
+        engine.minimum, engine.maximum = 1, 4
+        engine._prepare_raster()
+        west, south, east, north = Transformer.from_crs(25833, 3857, always_xy=True).transform_bounds(
+            -500, -500, 10500, 500)
+        dx, dy = east - west, north - south
+        outer = box(west - dx, south - dy, east + dx, north + dy)
+        hole = box(west + dx * .2, south - dy * .5, west + dx * .3, north + dy * .5)
+        mainland = Polygon(outer.exterior.coords, [hole.exterior.coords])
+        island = box(east + dx * 3, south, east + dx * 4, north)
+        engine.norway_path = Path("unused.gpkg")
+        engine._norway_shapes = [MultiPolygon([mainland, island])]
+        to_lonlat = Transformer.from_crs(3857, 4326, always_xy=True)
+        values = np.array([1., 2., 4.], dtype=np.float32)
+        for web_bounds in ((west, south, east, north),
+                           (west + dx * .1, south, east - dx * .1, north),
+                           (east + dx * 5, south, east + dx * 6, north)):
+            viewport = list(to_lonlat.transform_bounds(*web_bounds))
+            for size in (400, 800):
+                with self.subTest(bounds=web_bounds, size=size):
+                    with Image.open(engine.render(values, "placement", display_size=size,
+                                                  viewport=viewport)) as image:
+                        actual = np.asarray(image).copy()
+                    def full_mask(shapes, **kwargs):
+                        return geometry_mask(engine._norway_shapes, **kwargs)
+                    with patch("rasterio.features.geometry_mask", side_effect=full_mask):
+                        with Image.open(engine.render(values, "placement", display_size=size,
+                                                      viewport=viewport)) as image:
+                            np.testing.assert_array_equal(actual, np.asarray(image))
+
     def test_signed_changes_render_increases_red_and_reductions_blue(self):
         from PIL import Image
 
@@ -634,6 +791,25 @@ class PersistentWeatherMapTests(unittest.TestCase):
 
 
 class WeatherTests(unittest.TestCase):
+    def test_startup_warms_only_selected_weather_profile(self):
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "norway_grid_1000m.gpkg").touch()
+            engine = StationEngine.__new__(StationEngine)
+            engine.ensure_candidates = Mock()
+            engine.at_resolution = Mock(return_value=engine)
+            engine.saved_weather_map = Mock(return_value=None)
+            selected = "temperature:senorge30"
+            profile = dict(status=dict(state="ready"), phenomenon="temperature", kind="continuous",
+                           baseline=np.ones(1), minimum=.1, maximum=2)
+            engine.weather = Mock(available=[dict(id=selected), dict(id="snow:class")],
+                                  profile=Mock(return_value=profile), svv_profile=Mock(return_value=profile))
+            with patch("station_app.OUT", root), patch("builtins.print"):
+                engine.warm_weather_maps()
+            engine.weather.profile.assert_called_once_with(selected)
+
     def test_portable_smoke_test_urls_exist_in_application(self):
         import ast
         import inspect
@@ -691,6 +867,130 @@ class WeatherTests(unittest.TestCase):
                 self.assertEqual(loaded["model"], {"portable_test_model": True})
                 np.testing.assert_array_equal(loaded["baseline"], profile["baseline"])
                 np.testing.assert_array_equal(registry.svv_profile(config["id"])["baseline"], profile["baseline"])
+
+    def test_portable_package_keeps_sensor_metadata_without_other_weather_models(self):
+        import joblib
+        from build_portable import copy_temperature_runtime
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "stage"
+            output = root / "outputs" / "portable"
+            output.mkdir(parents=True)
+            temperature = FakeWeather().profile("temperature:continuous")
+            temperature.update(id="temperature:senorge30", phenomenon="temperature")
+            snow = FakeWeather().profile("snow:class")
+            snow["stations"].loc[0, "station_id"] = "SN-snow"
+            available, profiles = [], {}
+            for profile in (temperature, snow):
+                tag = profile["id"].replace(":", "_")
+                entry = {key: f"outputs/portable/{tag}_{key}.joblib" for key in ("profile", "svv", "model")}
+                for key in ("profile", "svv"):
+                    joblib.dump(profile, root / entry[key])
+                joblib.dump({"model": tag}, root / entry["model"])
+                profiles[profile["id"]] = entry
+                available.append({key: profile[key] for key in ("id", "phenomenon", "kind", "label", "metric", "unit")})
+            manifest = dict(cell_m=1000, profiles=profiles, available=available)
+            destination = Path(directory) / "portable"
+            bundled, excluded = copy_temperature_runtime(root, destination, manifest)
+            self.assertEqual(list(bundled["profiles"]), ["temperature:senorge30"])
+            self.assertEqual([item["id"] for item in bundled["available"]], ["temperature:senorge30"])
+            for path in profiles["snow:class"].values():
+                self.assertIn(Path(path), excluded)
+                self.assertTrue((root / path).is_file())
+                self.assertFalse((destination / path).exists())
+            self.assertTrue((destination / profiles["temperature:senorge30"]["model"]).is_file())
+            registry = WeatherRegistry(destination, None, None, None)
+            self.assertIn("snow:class", registry.station_dataset_ids())
+            with patch.object(registry, "_load", side_effect=AssertionError("Station metadata must not load a model")):
+                metadata = registry.station_metadata("snow:class", restricted=True)
+            self.assertEqual(metadata["stations"].iloc[0]["station_id"], "SN-snow")
+            self.assertTrue(metadata["ready"])
+            self.assertEqual(registry.loaded, {})
+
+    def test_sensor_only_station_remains_editable_without_loading_its_model(self):
+        class MetadataWeather(FakeWeather):
+            def __init__(self):
+                self.snow = super().profile("snow:class")
+                extra = self.snow["stations"].iloc[[0]].copy()
+                extra["station_id"], extra["name"] = "SN3", "Snow only"
+                self.snow["stations"] = pd.concat([self.snow["stations"], extra], ignore_index=True)
+
+            def profile(self, identifier):
+                if identifier == "snow:class":
+                    raise AssertionError("Snow model must not be loaded")
+                return super().profile(identifier)
+
+            def station_dataset_ids(self):
+                return {"snow:class", "temperature:continuous"}
+
+            def station_metadata(self, identifier, restricted=False):
+                from station_weather import station_metadata
+                return station_metadata(self.snow if identifier == "snow:class" else super().profile(identifier))
+
+        engine = FakeWeatherEngine()
+        engine.weather = MetadataWeather()
+        engine.sensor_catalog = lambda: {"SN1": ["temperature", "snow"], "SN2": ["temperature", "snow"], "SN3": ["snow"]}
+        scenario = Scenario(engine)
+        markers = scenario.state()["fixed_stations"]
+        self.assertEqual(next(marker for marker in markers if marker["station_id"] == "SN3")["sensors"], ["snow"])
+        scenario.apply(dict(action="move_frost", station_id="SN3", lon=6, lat=61))
+        moved = next(marker for marker in scenario.state()["fixed_stations"] if marker["station_id"] == "SN3")
+        self.assertEqual((moved["lon"], moved["lat"]), (6, 61))
+        self.assertIn("original_position", moved)
+        scenario.apply(dict(action="remove_frost", station_id="SN3"))
+        markers = scenario.state()["fixed_stations"]
+        self.assertTrue(next(marker for marker in markers if marker["station_id"] == "SN3")["removed"])
+
+    def test_station_metadata_does_not_load_model_and_refreshes_new_surface(self):
+        from station_weather import station_metadata
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = WeatherRegistry(root, None, None, None)
+            registry.available = [FakeWeather.available[2]]
+            pending = root / "surface.npz"
+            profile = FakeWeather().profile("snow:class")
+            missing = dict(station_metadata(dict(profile, baseline=None)), _pending_cache=pending)
+            ready = dict(station_metadata(profile), _pending_cache=None)
+            with patch.object(registry, "_load", side_effect=[missing, ready]) as load:
+                self.assertFalse(registry.station_metadata("snow:class")["ready"])
+                self.assertFalse(registry.station_metadata("snow:class")["ready"])
+                pending.touch()
+                self.assertTrue(registry.station_metadata("snow:class")["ready"])
+            self.assertEqual(load.call_count, 2)
+            self.assertTrue(all(call.kwargs == {"stations_only": True} for call in load.call_args_list))
+            self.assertEqual(registry.loaded, {})
+
+    def test_new_portable_snapshot_does_not_load_other_weather_models(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from build_portable import snapshot
+        from station_weather import station_metadata
+
+        temperature = FakeWeather().profile("temperature:continuous")
+        temperature.update(id="temperature:senorge30", model={"temperature": True})
+        snow = FakeWeather().profile("snow:class")
+        registry = SimpleNamespace(available=[
+            {key: profile[key] for key in ("id", "phenomenon", "kind", "label", "metric", "unit")}
+            for profile in (temperature, snow)], loaded={}, svv_loaded={}, models={}, station_profiles={},
+            profile=Mock(side_effect=lambda identifier: temperature if identifier == temperature["id"]
+                         else self.fail("Only the temperature model may be loaded")),
+            svv_profile=Mock(return_value=temperature),
+            station_metadata=Mock(return_value=station_metadata(snow)))
+        grid = pd.DataFrame(dict(objtype=["test"]))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("build_portable.ROOT", root), \
+                    patch("station_weather.WeatherRegistry", return_value=registry), \
+                    patch("make_uncertainty_map_gif.load_grid_all_fields", return_value=grid.copy()), \
+                    patch("greedy_400_stations_pruned.make_cache", return_value={}), \
+                    patch("build_portable.copy_input"):
+                manifest = snapshot(root / "stage")
+            registry.profile.assert_called_once_with("temperature:senorge30")
+            registry.station_metadata.assert_called_once_with("snow:class")
+            self.assertEqual(list(manifest["profiles"]), ["temperature:senorge30"])
+            self.assertTrue((root / "stage" / manifest["station_profiles"]["snow:class"]["profile"]).is_file())
+            self.assertFalse((root / "stage" / "outputs" / "portable" / "snow_class_model.joblib").exists())
 
     def test_precompute_all_selects_only_station_lab_models(self):
         from types import SimpleNamespace
@@ -1347,6 +1647,7 @@ class SavedPlacementTests(unittest.TestCase):
         self.engine = FakeWeatherEngine()
         self.engine.grid = pd.DataFrame(dict(x=[0., 5000., 10000.], y=[0., 0., 0.]))
         self.engine.cell_m = 5000
+        StationEngine._prepare_raster(self.engine)
         self.engine.weather = FakeWeather()
         self.engine.weather.available = [dict(FakeWeather.available[0], prefix=str(self.prefix))]
         self.engine.at_resolution = Mock(return_value=self.engine)
@@ -1384,6 +1685,88 @@ class SavedPlacementTests(unittest.TestCase):
         self.assertEqual(self.engine.render.call_count, 1)
         self.assertEqual(client.get("/api/placement.png?size=1").status_code, 400)
 
+    def test_placement_cutoff_masks_gain_and_uses_a_separate_cache_entry(self):
+        from types import MethodType
+        from PIL import Image
+
+        StationEngine._prepare_raster(self.engine)
+        self.engine.render = MethodType(StationEngine.render, self.engine)
+        self.engine._render_pixels = MethodType(StationEngine._render_pixels, self.engine)
+        client = create_app(self.engine).test_client()
+
+        full = client.get("/api/placement.png?size=400")
+        filtered = client.get("/api/placement.png?size=400&rmse_min=20")
+        self.assertEqual(full.status_code, 200)
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual(filtered.headers["X-Map-Cache"], "MISS")
+        self.assertEqual(client.get("/api/placement.png?size=400&rmse_min=20").headers["X-Map-Cache"], "HIT")
+        with Image.open(BytesIO(full.data)) as full_image, Image.open(BytesIO(filtered.data)) as filtered_image:
+            original = np.asarray(full_image)
+            actual = np.asarray(filtered_image)
+            expected = self.engine.render(np.array([10, 20, 30], dtype=np.float32), "placement", 0, 30,
+                                          cell_mask=np.array([False, False, True]), display_size=400)
+            with Image.open(expected) as expected_image:
+                np.testing.assert_array_equal(actual, np.asarray(expected_image))
+            self.assertGreater(np.count_nonzero(original[:, :, 3]), np.count_nonzero(actual[:, :, 3]))
+            self.assertGreater(np.count_nonzero(actual[:, :, 3]), 0)
+        for invalid in ("-1", "nan", "bad"):
+            self.assertEqual(client.get(f"/api/placement.png?rmse_min={invalid}").status_code, 400)
+
+    def test_combined_placement_cutoff_uses_combined_gain(self):
+        from unittest.mock import Mock
+
+        self.engine.render = Mock(return_value=BytesIO(b"image"))
+        self.engine.placement_layer = Mock(return_value=dict(
+            values=np.array([10, 20, 30], dtype=np.float32), maximum=30))
+        self.engine.weather.available.append(FakeWeather.available[2])
+        with patch.dict("station_app.PHENOMENON_DATASETS",
+                        {"temperature": "temperature:continuous", "snow": "snow:class"}, clear=True):
+            client = create_app(self.engine).test_client()
+            response = client.post("/api/action", json={"action": "layers", "value": ["temperature", "snow"]})
+            self.assertEqual(response.status_code, 200)
+            image = client.get("/api/placement.png?size=400&rmse_min=1.8")
+            self.assertEqual(image.status_code, 200)
+            np.testing.assert_array_equal(self.engine.render.call_args.kwargs["cell_mask"], [False, False, True])
+
+    def test_placement_corridor_uses_placement_grid_and_intersects_gain_cutoff(self):
+        from unittest.mock import Mock
+
+        self.engine.render = Mock(return_value=BytesIO(b"image"))
+        network = Mock()
+        network.corridor_mask.return_value = np.array([True, False, True])
+        client = create_app(self.engine, road_network=network).test_client()
+        settings = dict(bounds=[5, 58, 15, 65], corridor=True, distance_m=500,
+                        categories=["E"], classes=["1"], reference="")
+        query = dict(size=400, roads=json.dumps(settings), rmse_min=15)
+        response = client.get("/api/placement.png", query_string=query)
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(network.corridor_mask.call_args.args[0], self.engine)
+        self.assertEqual(network.corridor_mask.call_args.args[1:], (settings["bounds"], settings, 500))
+        np.testing.assert_array_equal(self.engine.render.call_args.kwargs["cell_mask"], [False, False, True])
+        self.assertEqual(client.get("/api/placement.png", query_string=query).headers["X-Map-Cache"], "HIT")
+        settings["distance_m"] = 1000
+        query["roads"] = json.dumps(settings)
+        self.assertEqual(client.get("/api/placement.png", query_string=query).headers["X-Map-Cache"], "MISS")
+        self.assertEqual(network.corridor_mask.call_count, 2)
+        self.assertEqual(client.get("/api/placement.png?roads=invalid").status_code, 400)
+
+    def test_placement_corridor_uses_finer_saved_grid_not_scenario_grid(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        active = SimpleNamespace(render=Mock(return_value=BytesIO(b"image")))
+        self.engine.at_resolution = Mock(return_value=active)
+        self.engine.placement_layer = Mock(return_value=dict(
+            values=np.array([1., 2., 3., 4.]), cell_m=500, minimum=0, maximum=4))
+        network = Mock()
+        network.corridor_mask.return_value = np.array([False, True, False, True])
+        client = create_app(self.engine, road_network=network).test_client()
+        settings = dict(bounds=[5, 58, 15, 65], corridor=True, distance_m=500)
+        response = client.get("/api/placement.png", query_string=dict(roads=json.dumps(settings), rmse_min=2))
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(network.corridor_mask.call_args.args[0], active)
+        np.testing.assert_array_equal(active.render.call_args.kwargs["cell_mask"], [False, False, False, True])
+
     def test_finer_live_grid_delegates_to_fixed_5000m_source(self):
         from types import SimpleNamespace
 
@@ -1407,6 +1790,96 @@ class SavedPlacementTests(unittest.TestCase):
         self.reader.return_value.loc[0, "total_error_reduction"] = -1
         with self.assertRaisesRegex(ValueError, "ugyldig"):
             self.engine.placement_layer("temperature:continuous")
+
+    def test_500m_road_placement_is_available_and_uses_viewport(self):
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as folder, patch("station_app.OUT", Path(folder)):
+            path = Path(folder) / "placement_gain_500m_road200.npz"
+            np.savez_compressed(path, x=[0., 5000., 10000.], y=[0., 0., 0.],
+                                gain=[1., 2., 3.], dataset="temperature:senorge30",
+                                cell_m=500, road_distance_m=200)
+            self.engine.cell_m = 500
+            self.engine.target_index = Mock(return_value=1)
+            self.engine.render = Mock(return_value=BytesIO(b"image"))
+            self.engine.default_pross_only = True
+            app = create_app(self.engine, initial_dataset="temperature:senorge30")
+            client = app.test_client()
+            metadata = client.get("/api/placement")
+            self.assertEqual(metadata.status_code, 200)
+            self.assertEqual(metadata.json["cell_m"], 500)
+            point = client.get("/api/placement/point?lon=10&lat=60")
+            self.assertEqual(point.json["value"], 2.)
+            image = client.get("/api/placement.png?size=400&bounds=[5,58,15,65]")
+            self.assertEqual(image.status_code, 200)
+            self.assertEqual(self.engine.render.call_args.kwargs["viewport"], [5, 58, 15, 65])
+            filtered = client.get("/api/placement.png?size=400&bounds=[5,58,15,65]&rmse_min=2")
+            self.assertEqual(filtered.status_code, 200)
+            np.testing.assert_array_equal(self.engine.render.call_args.kwargs["cell_mask"], [False, False, True])
+            self.engine.placement_layers.clear()
+            np.savez_compressed(path, x=[0., 5000., 9999.], y=[0., 0., 0.],
+                                gain=[1., 2., 3.], dataset="temperature:senorge30",
+                                cell_m=500, road_distance_m=200)
+            self.assertEqual(client.get("/api/placement").status_code, 400)
+
+    def test_combined_network_reads_its_own_map_without_falling_back_to_svv(self):
+        with tempfile.TemporaryDirectory() as folder, patch("station_app.OUT", Path(folder)):
+            self.engine.cell_m = 500
+            common = dict(x=[0., 5000., 10000.], y=[0., 0., 0.],
+                          dataset="temperature:senorge30", cell_m=500, road_distance_m=200)
+            original = Path(folder) / "placement_gain_500m_road200.npz"
+            combined = Path(folder) / "placement_gain_500m_road200_svv_met.npz"
+            np.savez_compressed(original, **common, gain=[1., 2., 3.], station_network="svv")
+            np.savez_compressed(combined, **common, gain=[.5, 1., 2.], station_network="svv-met")
+            road = self.engine.placement_layer("temperature:senorge30")
+            met = self.engine.placement_layer("temperature:senorge30", include_met=True)
+            np.testing.assert_array_equal(road["values"], [1., 2., 3.])
+            np.testing.assert_array_equal(met["values"], [.5, 1., 2.])
+            self.assertEqual(met["maximum"], road["maximum"])
+            self.assertEqual(met["maximum"], 3.)
+            self.assertEqual(met["station_network"], "svv-met")
+            original.unlink()
+            with self.assertRaisesRegex(ValueError, "felles fargeskala"):
+                self.engine.placement_layer("temperature:senorge30", include_met=True)
+            combined.unlink()
+            with self.assertRaisesRegex(ValueError, "MET-stasjoner mangler"):
+                self.engine.placement_layer("temperature:senorge30", include_met=True)
+
+    def test_full_and_empty_maps_follow_selected_network_and_never_fall_back_to_svv(self):
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as folder, patch("station_app.OUT", Path(folder)):
+            self.engine.cell_m = 500
+            self.engine.weather.available = [dict(self.engine.weather.available[0],
+                id="temperature:senorge30", kind="senorge30")]
+            self.engine.render = Mock(return_value=BytesIO(b"image"))
+            common = dict(x=[0., 5000., 10000.], y=[0., 0., 0.],
+                          dataset="temperature:senorge30", cell_m=500, road_distance_m=200)
+            for name, suffix, values in (("svv", "", [1., 2., 3.]),
+                                         ("all", "_all", [.1, .2, .3]),
+                                         ("empty", "_empty", [10., 20., 30.])):
+                extra = dict(empty_reference_rmse=5.) if name == "empty" else {}
+                np.savez_compressed(Path(folder) / f"placement_gain_500m_road200{suffix}.npz",
+                                    **common, gain=values, station_network=name, **extra)
+            client = create_app(self.engine, initial_dataset="temperature:senorge30").test_client()
+            full = client.get("/api/placement")
+            self.assertEqual(full.status_code, 200, full.json)
+            self.assertEqual(full.json["station_network"], "all")
+            self.assertEqual(full.json["maximum"], 3.)
+            result = client.post("/api/action", json=dict(action="network", value="empty"))
+            self.assertEqual(result.status_code, 200, result.json)
+            empty = client.get("/api/placement")
+            self.assertEqual(empty.json["station_network"], "empty")
+            self.assertEqual(empty.json["empty_reference_rmse"], 5.)
+            self.assertEqual(empty.json["maximum"], 30.)
+            self.assertEqual(client.get("/api/placement.png?size=400").status_code, 200)
+            np.testing.assert_array_equal(self.engine.render.call_args.args[0], [10., 20., 30.])
+            (Path(folder) / "placement_gain_500m_road200_empty.npz").unlink()
+            missing = client.get("/api/placement")
+            self.assertEqual(missing.status_code, 400)
+            self.assertIn("Tomt nett", missing.json["error"])
+            client.post("/api/action", json=dict(action="network", value="frost", pross_only=False))
+            self.assertEqual(client.get("/api/placement").json["station_network"], "all")
 
 
 class RoadTests(unittest.TestCase):
@@ -1488,6 +1961,87 @@ class RoadTests(unittest.TestCase):
         self.assertFalse(excluded.any())
         self.assertIs(actual, recoloured)
 
+    def test_national_corridor_uses_all_roads_and_inclusive_distance(self):
+        self.engine.grid = pd.DataFrame({
+            "x": [self.origin[0] + 250] * 4,
+            "y": [self.origin[1] + 425, self.origin[1] + 451,
+                  self.origin[1] + 4000, self.origin[1] + 8000]})
+        self.network.limit = 1
+        expected = self.network.national_corridor_mask(self.engine, 200)
+        np.testing.assert_array_equal(expected, [True, False, True, False])
+        self.network.prepare_grid(self.engine, 500)
+        network = RoadNetwork(self.path, limit=1)
+        with patch("station_roads.pyogrio.read_dataframe", side_effect=AssertionError("Use precomputed links")):
+            np.testing.assert_array_equal(network.national_corridor_mask(self.engine, 200), expected)
+            np.testing.assert_array_equal(network.national_corridor_mask(self.engine, 0), [False, False, True, False])
+
+    def test_nearest_road_corridor_matches_all_pairs_including_boundary_and_zero(self):
+        import shapely
+
+        roads, _ = self.network.read(self.bounds, {})
+        offsets = np.arange(-500, 3001, 125)
+        self.engine.grid = pd.DataFrame({
+            "x": self.origin[0] + offsets,
+            "y": self.origin[1] + np.resize([-450, -250, 0, 250, 450], len(offsets)),
+        })
+        half = self.engine.cell_m / 2
+        x, y = self.engine.grid["x"].to_numpy(), self.engine.grid["y"].to_numpy()
+        squares = shapely.box(x-half, y-half, x+half, y+half)
+        tree = shapely.STRtree(roads.geometry.to_numpy())
+        for distance in (0, 200, 2000):
+            with self.subTest(distance=distance):
+                hits = tree.query(squares, predicate="dwithin", distance=distance)
+                expected = np.zeros(len(squares), dtype=bool)
+                expected[hits[0]] = True
+                np.testing.assert_array_equal(self.network.spatial_mask(self.engine, roads, distance), expected)
+
+    def test_precomputed_nearest_distances_match_viewport_and_fallbacks(self):
+        from shapely.geometry import box
+
+        x, y = np.meshgrid(np.arange(-1000, 3001, 200), np.arange(-1000, 6001, 200))
+        self.engine.grid = pd.DataFrame(dict(x=self.origin[0] + x.ravel(), y=self.origin[1] + y.ravel()))
+        settings = dict(categories=list(self.network.category_bits), classes=self.network.metadata["classes"])
+        bounds = list(self.network.to_lonlat.transform_bounds(
+            self.origin[0]+300, self.origin[1]+700, self.origin[0]+800, self.origin[1]+2300))
+        distances = (0, 200, 500, 2000, 2500)
+        expected = {distance: self.network.corridor_mask(self.engine, bounds, settings, distance).copy()
+                    for distance in distances}
+        path = self.network.prepare_nearest_distances(self.engine, 2000)
+        self.assertTrue(path.is_file())
+        network = RoadNetwork(self.path)
+        with patch("station_roads.pyogrio.read_dataframe", side_effect=AssertionError("Must reuse distance cache")):
+            self.assertEqual(network.prepare_nearest_distances(self.engine, 2000), path)
+            self.assertIsNone(network.load_nearest_distances(self.engine, 2001))
+            national = network.national_corridor_mask(self.engine, 500)
+            np.testing.assert_array_equal(national, network.load_nearest_distances(self.engine, 500)["distance"] <= 500)
+        with patch.object(network, "nearest_corridor_mask", wraps=network.nearest_corridor_mask) as cached:
+            for distance in distances:
+                np.testing.assert_array_equal(network.corridor_mask(self.engine, bounds, settings, distance), expected[distance])
+            self.assertEqual(cached.call_count, 4)
+        filtered = dict(settings, categories=["R"])
+        with patch.object(network, "nearest_corridor_mask", side_effect=AssertionError("Filtered roads need exact fallback")):
+            actual = network.corridor_mask(self.engine, bounds, filtered, 500)
+            np.testing.assert_array_equal(actual, self.network.corridor_mask(self.engine, bounds, filtered, 500))
+            county = dict(settings, _county_key=("03",),
+                          _county_geometry=box(self.origin[0]-200, self.origin[1]-200,
+                                               self.origin[0]+1200, self.origin[1]+1500))
+            np.testing.assert_array_equal(network.corridor_mask(self.engine, bounds, county, 500),
+                                          self.network.corridor_mask(self.engine, bounds, county, 500))
+        changed = FakeEngine()
+        changed.cell_m, changed.grid = self.engine.cell_m, self.engine.grid.copy()
+        changed.grid["x"] += 1
+        self.assertIsNone(network.load_nearest_distances(changed, 500))
+
+    def test_precomputed_nearest_distance_includes_exact_boundary(self):
+        self.engine.grid = pd.DataFrame(dict(
+            x=[self.origin[0] + 250] * 3,
+            y=[self.origin[1] + 450, self.origin[1] + 451, self.origin[1] + 8000]))
+        self.network.prepare_nearest_distances(self.engine, 2000)
+        network = RoadNetwork(self.path)
+        with patch("station_roads.pyogrio.read_dataframe", side_effect=AssertionError("Use stored distances")):
+            np.testing.assert_array_equal(network.national_corridor_mask(self.engine, 200),
+                                          [True, False, False])
+
     def test_precomputed_corridor_keeps_exact_viewport_edge_clipping(self):
         settings = dict(categories=["R"], classes=["3"])
         bounds = list(self.network.to_lonlat.transform_bounds(
@@ -1552,6 +2106,31 @@ class RoadTests(unittest.TestCase):
         self.engine.grid = pd.DataFrame({"x": [self.origin[0] + 250, self.origin[0] + 750, self.origin[0] + 10000],
                                          "y": [self.origin[1]] * 3})
         self.engine.cell_m = 500
+
+    def test_placement_corridor_renders_real_road_geometry(self):
+        from types import MethodType
+        from unittest.mock import Mock
+        from PIL import Image
+
+        engine = FakeWeatherEngine()
+        engine.grid = self.engine.grid
+        engine.cell_m = 500
+        StationEngine._prepare_raster(engine)
+        engine.render = MethodType(StationEngine.render, engine)
+        engine._render_pixels = MethodType(StationEngine._render_pixels, engine)
+        engine.at_resolution = Mock(return_value=engine)
+        values = np.array([1., 2., 3.], dtype=np.float32)
+        engine.placement_layer = Mock(return_value=dict(values=values, cell_m=500, minimum=0, maximum=3))
+        settings = dict(bounds=self.bounds, categories=["R"], classes=["3"], corridor=True, distance_m=60)
+        mask = self.network.corridor_mask(engine, self.bounds, settings, 60)
+        np.testing.assert_array_equal(mask, [True, True, False])
+        client = create_app(engine, road_network=self.network).test_client()
+        response = client.get("/api/placement.png", query_string=dict(size=400, roads=json.dumps(settings)))
+        self.assertEqual(response.status_code, 200)
+        with Image.open(BytesIO(response.data)) as actual, \
+                Image.open(engine.render(values, "placement", 0, 3, cell_mask=mask, display_size=400)) as expected:
+            np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+            self.assertGreater(np.count_nonzero(np.asarray(actual)[:, :, 3]), 0)
 
     def test_geometry_only_road_api_never_calculates_weather_or_samples_grid(self):
         client = create_app(self.engine, road_network=self.network).test_client()
@@ -2245,6 +2824,27 @@ class PartialPredictionTests(unittest.TestCase):
                 self.engine.prediction_at(1, indices)
         self.assertEqual(len(self.engine.prediction_at(1, [])), 0)
         self.assertEqual(self.calls, [])
+
+    def test_radius_is_inclusive_and_outside_targets_do_not_predict(self):
+        self.engine.station_radius_m = 1000
+        full = self.engine.prediction(0)
+        np.testing.assert_array_equal(full, [0, 1000, np.inf])
+        self.assertEqual(self.calls, [2])
+        self.engine.predictions.clear()
+        partial = self.engine.prediction_at(0, np.array([2, 1, 0]))
+        np.testing.assert_array_equal(partial, [np.inf, 1000, 0])
+        self.assertEqual(self.calls, [2, 2])
+        result = self.engine.prediction_at(0, np.array([2]))
+        self.assertTrue(np.isposinf(result[0]))
+        self.assertEqual(self.calls, [2, 2])
+
+    def test_class_radius_does_not_turn_excluded_targets_into_finite_scores(self):
+        from unittest.mock import Mock
+
+        self.engine.station_radius_m = 1000
+        self.engine.weather = Mock()
+        self.engine.weather.profile.return_value = {"model": self.engine.model, "kind": "class"}
+        np.testing.assert_array_equal(self.engine.prediction(0, "snow:class"), [0, 1, np.inf])
 
 
 class HumidityMapTests(unittest.TestCase):

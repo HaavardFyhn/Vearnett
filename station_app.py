@@ -42,7 +42,8 @@ from make_uncertainty_map_gif import (
 )
 from station_weather import WeatherRegistry, WEATHER, exact_network
 from station_weather import PHENOMENON_DATASETS as STATION_LAB_DATASETS
-from station_pross import pross_excluded, svv_mask
+from station_weather import DIRECT_P95
+from station_pross import pross_excluded, svv_mask, svv_met_excluded, PLACEMENT_SUFFIXES, PLACEMENT_LABELS, EMPTY_REFERENCE_RMSE
 from station_roads import RoadNetwork
 from station_kuldehull import KuldehullLayer, lake_settings
 from station_weather_maps import DISPLAY_SIZES, WeatherMapCache, colour_reference, frost_limits
@@ -51,6 +52,9 @@ from rasterio.warp import reproject, Resampling
 from scipy.ndimage import binary_dilation
 
 ASSET_ROOT = HERE
+
+ROAD_COLOUR_CALIBRATION_ENABLED = True
+ROAD_COLOUR_CALIBRATION_DISTANCE_M = 200
 
 TERRAIN_LAYERS = {
     "elevation": ("Høyde over havet", "m", "terrain", 1),
@@ -89,27 +93,34 @@ class GreedySurfaces:
 
 
 class StationEngine:
-    def __init__(self, surface_path, cell_m=5000, frost_neighbors=0, shared=None):
+    def __init__(self, surface_path, cell_m=5000, frost_neighbors=0, shared=None,
+                 station_radius_m=0, *, data_root=None):
         if frost_neighbors != 0:
             raise ValueError("Frost-nettet støtter bare eksakt beregning over alle stasjoner")
         self.cell_m = cell_m
+        if not np.isfinite(station_radius_m) or station_radius_m < 0:
+            raise ValueError("Stasjonsradius må være endelig og ikke-negativ")
+        self.station_radius_m = (station_radius_m if shared is None else
+                                 shared.root.station_radius_m)
         from grid_resolution import source_spacing
         self.candidate_cell_m = source_spacing(cell_m)
         self.default_pross_only = True
-        self.norway_path = OUT / "norway_polygon.gpkg"
+        self.data_root = shared.data_root if shared is not None else (HERE if data_root is None else data_root)
+        out = self.data_root / "outputs"
+        self.norway_path = out / "norway_polygon.gpkg"
         self.root = self if shared is None else shared.root
         self.surface_path = surface_path
         self.frost_neighbors = frost_neighbors
         self.resources = ExitStack()
-        self.grid = load_grid_all_fields(OUT / f"norway_grid_{cell_m}m.gpkg")
-        portable_path = OUT / "portable_weather.json"
+        self.grid = load_grid_all_fields(out / f"norway_grid_{cell_m}m.gpkg")
+        portable_path = out / "portable_weather.json"
         portable = json.loads(portable_path.read_text(encoding="utf-8")) if portable_path.is_file() else None
         original = self.grid if portable is not None or cell_m == 5000 else load_grid_all_fields(SOURCE_GRID)
         same_candidates = shared is not None and shared.candidate_cell_m == self.candidate_cell_m
         self.candidate_grid = (shared.candidate_grid if same_candidates else
                                self.grid if cell_m == self.candidate_cell_m else None)
         self.candidate_categories = (shared.candidate_categories if same_candidates else
-            pd.Index(pyogrio.read_dataframe(OUT / f"norway_grid_{self.candidate_cell_m}m.gpkg", columns=["objtype"], read_geometry=False)["objtype"].dropna().unique()))
+            pd.Index(pyogrio.read_dataframe(out / f"norway_grid_{self.candidate_cell_m}m.gpkg", columns=["objtype"], read_geometry=False)["objtype"].dropna().unique()))
         categories = (pd.Index(portable["categories"]) if portable is not None else
                   pd.Index(original["objtype"].unique()).union(self.grid["objtype"].unique()).union(self.candidate_categories))
         self.categories = categories
@@ -127,7 +138,7 @@ class StationEngine:
                    if cell_m == 1000 else GreedySurfaces(self))
         self.model_frames = {"temperature:continuous": self.frames}
         self.model = None if portable is not None else joblib.load(MODEL) if shared is None else shared.model
-        self.weather_images = (WeatherMapCache(OUT / "station_app_cache" / "weather_maps")
+        self.weather_images = (WeatherMapCache(out / "station_app_cache" / "weather_maps")
                        if shared is None else shared.root.weather_images)
         self.tree = shared.tree if same_candidates else None
         self.to_xy = Transformer.from_crs(4326, 25833, always_xy=True)
@@ -140,9 +151,9 @@ class StationEngine:
         self.maximum = (6.5 if portable is not None else shared.maximum if shared is not None else
                         max(float(np.percentile(self.frames[0], 99.5)), self.minimum * 2) if cell_m == 1000 else 6.5)
         models = shared.weather.models if shared is not None and shared.weather is not None else None
-        self.weather = (WeatherRegistry(HERE, self.grid, self.cache, categories, frost_neighbors, models=models,
+        self.weather = (WeatherRegistry(self.data_root, self.grid, self.cache, categories, frost_neighbors, models=models,
                                        cell_m=cell_m, allow_precompute=False)
-                if portable is not None or (HERE / "frost_history.db").exists() else None)
+                if portable is not None or (self.data_root / "frost_history.db").exists() else None)
         self._prepare_raster()
         if shared is None:
             self.engines = {cell_m: self}
@@ -154,7 +165,7 @@ class StationEngine:
             return
         with self.root.candidate_lock:
             if self.candidate_grid is None:
-                self.candidate_grid = load_grid_all_fields(OUT / f"norway_grid_{self.candidate_cell_m}m.gpkg")
+                self.candidate_grid = load_grid_all_fields(self.data_root / "outputs" / f"norway_grid_{self.candidate_cell_m}m.gpkg")
             if self.tree is None:
                 self.tree = cKDTree(self.candidate_grid[["x", "y"]].to_numpy())
             features = self.candidate_grid.copy(deep=False)
@@ -188,8 +199,8 @@ class StationEngine:
         """Phenomena per Frost station id, taken from the already loaded model station lists."""
         if getattr(self, "weather", None) is None:
             return {}
-        available = {item["id"] for item in self.weather.available}
-        profiles = {phenomenon: self.weather.profile(dataset) for phenomenon, dataset in PHENOMENON_DATASETS.items()
+        available = self.weather.station_dataset_ids()
+        profiles = {phenomenon: self.weather.station_metadata(dataset) for phenomenon, dataset in lab_datasets(self).items()
                     if dataset in available}
         key = tuple((phenomenon, id(profile["stations"])) for phenomenon, profile in profiles.items())
         with self.lock:
@@ -201,16 +212,33 @@ class StationEngine:
                 self._sensor_catalog, self._sensor_catalog_key = catalog, key
             return self._sensor_catalog
 
-    def saved_weather_map(self, profile, display_size, limits):
-        return self.weather_images.get(self, profile, display_size, limits)
+    def saved_weather_map(self, profile, display_size, limits, numeric=False):
+        return self.weather_images.get(self, profile, display_size, limits, build=numeric, numeric=numeric)
+
+    def road_colour_limits(self, profile):
+        root = self.root
+        key = (id(self.grid), id(profile["baseline"]), ROAD_COLOUR_CALIBRATION_DISTANCE_M)
+        with root.road_calibration_lock:
+            if key not in root.road_calibration_limits:
+                mask = root.road_network_provider().national_corridor_mask(
+                    self, ROAD_COLOUR_CALIBRATION_DISTANCE_M)
+                values = profile["baseline"][mask]
+                values = values[np.isfinite(values) & (values > 0)]
+                if not len(values):
+                    raise ValueError("Ingen positive temperaturfeil langs veg for fargekalibrering")
+                lower, upper = np.percentile(values, [0.5, 99.5])
+                minimum = max(float(lower), 0.0001)
+                root.road_calibration_limits[key] = (minimum, max(float(upper), minimum * 1.01))
+            return root.road_calibration_limits[key]
 
     def station_owner_catalog(self):
         from station_owners import load_catalog
         return load_catalog(ASSET_ROOT, HERE)
 
-    def warm_weather_maps(self, resolutions=(1000,)):
-        """Load fixed weather profiles, grids, and available prepared images before serving."""
+    def warm_weather_maps(self, resolutions=(1000,), dataset=None):
+        """Load the selected weather profile and available prepared images before serving."""
         self.ensure_candidates()
+        dataset = dataset or default_dataset(self, "temperature")
         ready = 0
         missing = 0
         for spacing in resolutions:
@@ -220,7 +248,7 @@ class StationEngine:
             if active.weather is None:
                 continue
             for config in active.weather.available:
-                if config["id"] not in PHENOMENON_DATASETS.values():
+                if config["id"] != dataset:
                     continue
                 profile = active.weather.profile(config["id"])
                 if profile["status"]["state"] != "ready":
@@ -228,11 +256,26 @@ class StationEngine:
                     continue
                 limits = frost_limits(colour_reference(active.weather, config["id"], profile))
                 for size in DISPLAY_SIZES:
+                    active.saved_weather_map(profile, size, limits, numeric=True)
                     if active.saved_weather_map(profile, size, limits) is None:
                         missing += 1
                     else:
                         ready += 1
         print(f"Laster værkart", flush=True)
+
+    def warm_placement_maps(self):
+        from station_placement_tiles import PlacementTiles
+        cache = PlacementTiles(OUT / "station_app_cache" / "placement_tiles")
+        self.root.placement_tiles = cache
+        dataset = default_dataset(self, "temperature")
+        for network, suffix in PLACEMENT_SUFFIXES.items():
+            if not (OUT / f"{placement_stem(dataset)}{suffix}.npz").is_file():
+                continue
+            print(f"Klargjør plasseringsgevinst: {PLACEMENT_LABELS[network]} ...", flush=True)
+            layer = self.placement_layer(dataset, station_network=network)
+            active = self.at_resolution(layer["cell_m"])
+            count = cache.warm(active, layer)
+            print(f"Plasseringsgevinst klar: {count} oversiktsfliser", flush=True)
 
     def _prepare_raster(self):
         from rasterio.transform import from_origin, array_bounds
@@ -279,17 +322,39 @@ class StationEngine:
                 profile = self.weather.profile(dataset) if dataset is not None else None
                 model = self.model if profile is None else profile["model"]
                 source = subset_cache(self.candidate_cache, np.array([index]))
-                values = np.empty(len(self.grid), dtype=np.float32)
-                for start in range(0, len(self.grid), 50000):
-                    targets = np.arange(start, min(start + 50000, len(self.grid)))
+                values = np.full(len(self.grid), np.inf, dtype=np.float32)
+                eligible = self.influence_targets(index)
+                for start in range(0, len(eligible), 50000):
+                    targets = eligible[start:start + 50000]
                     values[targets] = predict(model, source, self.cache, targets)[0]
                 if profile is not None and profile["kind"] == "class":
-                    values = np.minimum(values, 1)
+                    values[eligible] = np.minimum(values[eligible], 1)
                 self.predictions[key] = values
                 if len(self.predictions) > 64:
                     self.predictions.popitem(last=False)
             self.predictions.move_to_end(key)
             return self.predictions[key]
+
+    def influence_targets(self, index, target_ids=None):
+        radius = getattr(self, "station_radius_m", 0)
+        if target_ids is None:
+            if not radius:
+                return np.arange(len(self.grid))
+            if not hasattr(self, "_influence_tree"):
+                xs = self.cache.get("senorge_x", self.cache["x"])
+                ys = self.cache.get("senorge_y", self.cache["y"])
+                self._influence_tree = cKDTree(np.column_stack((xs, ys)))
+            x = self.candidate_cache.get("senorge_x", self.candidate_cache["x"])[index]
+            y = self.candidate_cache.get("senorge_y", self.candidate_cache["y"])[index]
+            return np.asarray(self._influence_tree.query_ball_point(
+                [x, y], radius, return_sorted=True), dtype=np.int64)
+        if not radius:
+            return np.arange(len(target_ids))
+        x = self.candidate_cache.get("senorge_x", self.candidate_cache["x"])[index]
+        y = self.candidate_cache.get("senorge_y", self.candidate_cache["y"])[index]
+        xs = self.cache.get("senorge_x", self.cache["x"])[target_ids]
+        ys = self.cache.get("senorge_y", self.cache["y"])[target_ids]
+        return np.flatnonzero(np.hypot(xs - x, ys - y) <= radius)
 
     def prediction_at(self, index, target_ids, dataset=None):
         target_ids = np.asarray(target_ids, dtype=np.int64)
@@ -307,12 +372,14 @@ class StationEngine:
                 profile = self.weather.profile(dataset) if dataset is not None else None
                 model = self.model if profile is None else profile["model"]
                 source = subset_cache(self.candidate_cache, np.array([index]))
-                values = np.empty(len(target_ids), dtype=np.float32)
-                for start in range(0, len(target_ids), 50000):
-                    targets = target_ids[start:start + 50000]
-                    values[start:start + len(targets)] = predict(model, source, self.cache, targets)[0]
+                values = np.full(len(target_ids), np.inf, dtype=np.float32)
+                eligible = self.influence_targets(index, target_ids)
+                for start in range(0, len(eligible), 50000):
+                    positions = eligible[start:start + 50000]
+                    targets = target_ids[positions]
+                    values[positions] = predict(model, source, self.cache, targets)[0]
                 if profile is not None and profile["kind"] == "class":
-                    values = np.minimum(values, 1)
+                    values[eligible] = np.minimum(values[eligible], 1)
                 self.partial_predictions[key] = values
                 if len(self.partial_predictions) > 32:
                     self.partial_predictions.popitem(last=False)
@@ -374,10 +441,59 @@ class StationEngine:
                     minimum=minimum, maximum=maximum, values=values,
                     gradient="linear-gradient(to right," + ",".join(stops) + ")")
 
-    def placement_layer(self, dataset):
+    def placement_layer(self, dataset, prefer_road=True, include_met=False, station_network=None):
+        requested_network = station_network or ("svv-met" if include_met else "svv")
+        if requested_network not in PLACEMENT_SUFFIXES:
+            raise ValueError("Plasseringskart finnes ikke for dette stasjonsnettet")
+        suffix = PLACEMENT_SUFFIXES[requested_network]
+        stem = placement_stem(dataset)
+        road_path = OUT / f"{stem}{suffix}.npz"
+        road_requested = prefer_road and dataset in ("temperature:senorge30", DIRECT_P95)
+        if road_requested and dataset == DIRECT_P95 and not road_path.is_file():
+            raise ValueError(f"Direct P95-plasseringskart for {PLACEMENT_LABELS[requested_network]} er ikke beregnet")
+        if road_requested and requested_network != "svv" and not road_path.is_file():
+            raise ValueError(f"Plasseringskart for {PLACEMENT_LABELS[requested_network]} mangler")
+        if road_requested and requested_network in ("svv-met", "all") and not (OUT / f"{stem}.npz").is_file():
+            raise ValueError("Vegvær-plasseringskartet mangler; det kreves for felles fargeskala")
+        if road_requested and road_path.is_file():
+            active = self.at_resolution(500)
+            if active is not self:
+                return active.placement_layer(dataset, prefer_road=prefer_road, station_network=requested_network)
+            stat = road_path.stat()
+            key = (dataset, requested_network, stat.st_size, stat.st_mtime_ns)
+            if not hasattr(self, "placement_layers"):
+                self.placement_layers = {}
+            if key not in self.placement_layers:
+                with np.load(road_path, allow_pickle=False) as stored:
+                    if (str(stored["dataset"]) != dataset or int(stored["cell_m"]) != 500 or
+                            int(stored["road_distance_m"]) != 200 or
+                            not np.array_equal(stored["x"], self.grid["x"].to_numpy()) or
+                            not np.array_equal(stored["y"], self.grid["y"].to_numpy())):
+                        raise ValueError("Plasseringskartet samsvarer ikke med 500 m-rutenettet")
+                    values = stored["gain"].astype(np.float32)
+                    station_radius_m = float(stored["station_radius_m"]) if "station_radius_m" in stored else 0
+                    station_network = str(stored["station_network"]) if "station_network" in stored else "svv"
+                    if station_network != requested_network:
+                        raise ValueError("Plasseringskartet har feil stasjonsnett")
+                    if station_network == "empty" and "empty_reference_rmse" not in stored:
+                        raise ValueError("Plasseringskart for tomt nett mangler referansefeil")
+                    empty_reference = float(stored["empty_reference_rmse"]) if station_network == "empty" else None
+                    if empty_reference is not None and (not np.isfinite(empty_reference) or empty_reference <= 0):
+                        raise ValueError("Plasseringskartet har ugyldig referansefeil for tomt nett")
+                if values.shape != (len(self.grid),) or not np.isfinite(values).all() or (values < 0).any():
+                    raise ValueError("Plasseringskartet inneholder ugyldige verdier")
+                maximum = (self.placement_layer(dataset, prefer_road=True, station_network="svv")["maximum"]
+                           if requested_network in ("svv-met", "all") else max(float(values.max()), .0001))
+                self.placement_layers[key] = dict(dataset=dataset, label="Plasseringsgevinst",
+                    field="gain", unit="°C·km²", metric="P95" if dataset == DIRECT_P95 else "RMSE", weather_label="Temperatur",
+                    cell_m=500, minimum=0., maximum=maximum, source_version=[stat.st_size, stat.st_mtime_ns],
+                    values=values, bounds=self.bounds, source=road_path.name, road_distance_m=200,
+                    station_radius_m=station_radius_m, station_network=station_network,
+                    empty_reference_rmse=empty_reference)
+            return self.placement_layers[key]
         active = self.at_resolution(5000)
         if active is not self:
-            return active.placement_layer(dataset)
+            return active.placement_layer(dataset, prefer_road=prefer_road, station_network=requested_network)
         config = next((item for item in self.weather.available if item["id"] == dataset), None)
         if config is None:
             raise ValueError("Ingen lagret femårsmodell for dette værvalget")
@@ -402,7 +518,7 @@ class StationEngine:
             self.placement_layers[key] = dict(dataset=dataset, label="Plasseringsgevinst", field="total_error_reduction",
                 unit=config["unit"], metric=config["metric"], weather_label=config["label"], cell_m=5000,
                 minimum=0., maximum=max(float(values.max()), .0001), values=values,
-                bounds=self.bounds, source=path.name)
+                bounds=self.bounds, source=path.name, source_version=[stat.st_size, stat.st_mtime_ns])
         return self.placement_layers[key]
 
     def terrain_catalog(self):
@@ -410,7 +526,9 @@ class StationEngine:
         for field in TERRAIN_LAYERS:
             if field in self.grid and np.isfinite(self.grid[field].to_numpy(float)).any():
                 result.append({key: value for key, value in self.terrain_layer(field).items() if key != "values"})
-        return dict(cell_m=self.cell_m, layers=result)
+        return dict(cell_m=self.cell_m, layers=result,
+                    placement_available=any((OUT / f"{placement_stem(default_dataset(self, 'temperature'))}{suffix}.npz").is_file()
+                                            for suffix in PLACEMENT_SUFFIXES.values()))
 
     def target_index(self, lon, lat):
         if not np.isfinite([lon, lat]).all() or not (-180 <= lon <= 180 and -90 <= lat <= 90):
@@ -437,39 +555,78 @@ class StationEngine:
                                    value=value if np.isfinite(value) else None))
         return dict(cell_m=self.cell_m, x=float(row.x), y=float(row.y), values=values)
 
-    def render(self, values, mode, minimum=None, maximum=None, reduction_max=2, cell_mask=None, display_size=None):
+    def render(self, values, mode, minimum=None, maximum=None, reduction_max=2, cell_mask=None,
+               display_size=None, viewport=None, raster_source=None, map_scale="log"):
+        image, _ = self._render_pixels(values, mode, minimum, maximum, reduction_max, cell_mask,
+                                        display_size, viewport, raster_source, map_scale=map_scale)
+        buffer = BytesIO()
+        Image.fromarray(image).save(buffer, format="PNG")
+        buffer.seek(0)
+        return buffer
 
-
+    def _render_pixels(self, values, mode, minimum=None, maximum=None, reduction_max=2, cell_mask=None,
+                       display_size=None, viewport=None, raster_source=None, filter_missing=False,
+                       map_scale="log"):
         scale = 1 if display_size is None else min(1, display_size / max(self.web_height, self.web_width))
         height, width = max(1, round(self.web_height * scale)), max(1, round(self.web_width * scale))
         web_transform = self.web_transform * self.web_transform.scale(self.web_width / width, self.web_height / height)
+        if viewport is not None:
+            from rasterio.transform import from_bounds
+            west, south, east, north = viewport
+            if (not np.isfinite(viewport).all() or not -180 <= west < east <= 180 or
+                    not -85.051129 <= south < north <= 85.051129):
+                raise ValueError("Ugyldig kartutsnitt")
+            bounds = Transformer.from_crs(4326, 3857, always_xy=True).transform_bounds(west, south, east, north)
+            width = height = display_size or 800
+            web_transform = from_bounds(*bounds, width, height)
         image = np.zeros((height, width, 4), dtype=np.uint8)
+        target = None
         minimum = self.minimum if minimum is None else minimum
         maximum = self.maximum if maximum is None else maximum
+        missing = None if values is None else ~np.isfinite(values)
+        entirely_missing = values is None
+        if (getattr(self, "station_radius_m", 0) and values is not None and
+                mode in ("uncertainty", "baseline")):
+            finite = np.isfinite(values)
+            cell_mask = finite if cell_mask is None else cell_mask & finite
         if mode in ("uncertainty", "baseline", "combined"):
             values = (np.full(len(self.grid), maximum, dtype=np.float32) if values is None else
                       np.where(np.isfinite(values), values, maximum))
         if values is not None:
-            source = np.full(self.raster_shape, -9999, dtype=np.float32)
-            source[self.rows, self.columns] = values if cell_mask is None else np.where(cell_mask, values, -9999)
+            if raster_source is None:
+                source = np.full(self.raster_shape, -9999, dtype=np.float32)
+                source[self.rows, self.columns] = values if cell_mask is None else np.where(cell_mask, values, -9999)
+                source_transform = self.transform
+            else:
+                source, source_transform = raster_source
             target = np.full((height, width), -9999, dtype=np.float32)
-            reproject(source, target, src_transform=self.transform, src_crs=25833,
+            reproject(source, target, src_transform=source_transform, src_crs=25833,
                       dst_transform=web_transform, dst_crs=3857,
                       src_nodata=-9999, dst_nodata=-9999,
-                      resampling=Resampling.average if scale < 1 and mode in ("uncertainty", "baseline") else Resampling.nearest)
+                      resampling=Resampling.average if raster_source is None and scale < 1 and
+                      mode in ("uncertainty", "baseline") else Resampling.nearest)
             valid = (target != -9999) & np.isfinite(target)
             if mode.startswith("terrain:"):
                 terrain = self.terrain_layer(mode.split(":", 1)[1])
                 scaled = (target - terrain["minimum"]) / (terrain["maximum"] - terrain["minimum"])
                 colors = matplotlib.colormaps[terrain["palette"]](np.clip(scaled, 0, 1))
             elif mode == "placement":
-                scaled = np.log1p(np.maximum(target, 0)) / np.log1p(maximum)
+                scaled = (np.maximum(target, 0) / maximum if map_scale == "linear" else
+                          np.log1p(np.maximum(target, 0)) / np.log1p(maximum))
                 colors = matplotlib.colormaps["YlOrRd"](np.clip(scaled, 0, 1))
             elif mode in ("uncertainty", "baseline"):
-                scaled = (np.log(np.maximum(target, minimum)) - np.log(minimum)) / np.log(maximum / minimum)
+                if map_scale == "direct_p95":
+                    scaled = np.interp(target, [0., 1., 3.], [0., .5, 1.])
+                elif map_scale == "linear":
+                    scaled = (target - minimum) / (maximum - minimum)
+                else:
+                    scaled = (np.log(np.maximum(target, minimum)) - np.log(minimum)) / np.log(maximum / minimum)
                 colors = matplotlib.colormaps["RdBu_r"](np.clip(scaled, 0, 1))
+                if map_scale == "direct_p95":
+                    colors[target == 1, :3] = 247 / 255
             elif mode in ("change", "affected_change"):
-                magnitude = np.log1p(np.abs(target) / (reduction_max / 2000)) / np.log1p(2000)
+                magnitude = (np.abs(target) / reduction_max if map_scale == "linear" else
+                             np.log1p(np.abs(target) / (reduction_max / 2000)) / np.log1p(2000))
                 scaled = np.sign(target) if mode == "affected_change" else np.sign(target) * np.clip(magnitude, 0, 1)
                 colors = matplotlib.colormaps["RdBu"]((scaled + 1) / 2)
                 valid &= target != 0
@@ -480,14 +637,17 @@ class StationEngine:
             elif mode == "combined":
                 scaled = (target - minimum) / (maximum - minimum)
                 colors = matplotlib.colormaps["RdBu_r"](np.clip(scaled, 0, 1))
-            elif mode == "combined_change":
-                colors = matplotlib.colormaps["RdBu"]((np.clip(target / maximum, -1, 1) + 1) / 2)
-                valid &= target != 0
+            elif mode in ("combined_change", "comparison_gap"):
+                palette = "RdBu_r" if mode == "comparison_gap" else "RdBu"
+                colors = matplotlib.colormaps[palette]((np.clip(target / maximum, -1, 1) + 1) / 2)
+                if mode == "combined_change":
+                    valid &= target != 0
             elif mode == "combined_reduction":
                 colors = matplotlib.colormaps["YlGnBu"](np.clip(target / maximum, 0, 1))
                 valid &= target > 0
             else:
-                scaled = np.log1p(np.maximum(target, 0) / (reduction_max / 2000)) / np.log1p(2000)
+                scaled = (np.maximum(target, 0) / reduction_max if map_scale == "linear" else
+                          np.log1p(np.maximum(target, 0) / (reduction_max / 2000)) / np.log1p(2000))
                 colors = matplotlib.colormaps["YlGnBu"](np.clip(scaled, 0, 1))
                 valid &= target > 0
             image = (colors * 255).astype(np.uint8)
@@ -496,6 +656,19 @@ class StationEngine:
                 image[:, :, 3] = valid.astype(np.uint8) * 255
                 outline = binary_dilation(valid) & ~valid
                 image[outline] = [255, 255, 255, 255]
+            if filter_missing:
+                # Missing estimates stay visible at every cutoff, as with the server-side filter.
+                if entirely_missing:
+                    target.fill(np.inf)
+                elif missing.any():
+                    unknown = np.zeros(self.raster_shape, dtype=np.float32)
+                    unknown[self.rows, self.columns] = missing
+                    projected = np.zeros(target.shape, dtype=np.float32)
+                    reproject(unknown, projected, src_transform=self.transform, src_crs=25833,
+                              dst_transform=web_transform, dst_crs=3857,
+                              resampling=Resampling.average if scale < 1 and mode in ("uncertainty", "baseline")
+                              else Resampling.nearest)
+                    target[projected > 0] = np.inf
         if getattr(self, "norway_path", None) is not None:
             from rasterio.features import geometry_mask
 
@@ -503,18 +676,64 @@ class StationEngine:
                 self._norway_shapes = pyogrio.read_dataframe(self.norway_path).to_crs(3857).geometry.tolist()
             if not hasattr(self, "_norway_masks"):
                 self._norway_masks = {}
-            key = (height, width)
-            if key not in self._norway_masks:
-                self._norway_masks[key] = geometry_mask(
-                    self._norway_shapes, out_shape=(height, width), transform=web_transform, invert=True)
-            image[:, :, 3] = np.where(self._norway_masks[key], image[:, :, 3], 0)
-        buffer = BytesIO()
-        Image.fromarray(image).save(buffer, format="PNG")
-        buffer.seek(0)
-        return buffer
+            key = (height, width, tuple(viewport) if viewport is not None else None)
+            if viewport is not None and key not in self._norway_masks:
+                import shapely
+
+                if not hasattr(self, "_norway_tree"):
+                    self._norway_parts = shapely.get_parts(self._norway_shapes)
+                    self._norway_tree = shapely.STRtree(self._norway_parts)
+                # Keep clipping edges outside the image so rasterized boundary pixels stay unchanged.
+                padding = max(abs(web_transform.a), abs(web_transform.e))
+                window = shapely.box(bounds[0] - padding, bounds[1] - padding,
+                                     bounds[2] + padding, bounds[3] + padding)
+                selected = self._norway_parts[self._norway_tree.query(window)]
+                shapes = shapely.intersection(selected, window)
+                shapes = shapes[~shapely.is_empty(shapes)]
+                mask = (geometry_mask(shapes, out_shape=(height, width),
+                                      transform=web_transform, invert=True) if len(shapes)
+                        else np.zeros((height, width), dtype=bool))
+                self._norway_masks[key] = mask
+                if len(self._norway_masks) > 512:
+                    self._norway_masks.pop(next(iter(self._norway_masks)))
+            else:
+                if key not in self._norway_masks:
+                    self._norway_masks[key] = geometry_mask(
+                        self._norway_shapes, out_shape=(height, width), transform=web_transform, invert=True)
+                mask = self._norway_masks[key]
+            image[:, :, 3] = np.where(mask, image[:, :, 3], 0)
+        return image, target
 
 
 PHENOMENON_DATASETS = STATION_LAB_DATASETS
+
+
+def lab_datasets(engine):
+    weather = getattr(engine, "weather", None)
+    available = {item["id"] for item in weather.available} if weather is not None else set()
+    if DIRECT_P95 not in available and "temperature:senorge30" in available:
+        return dict(PHENOMENON_DATASETS, temperature="temperature:senorge30")
+    return PHENOMENON_DATASETS
+
+
+def default_dataset(engine, phenomenon):
+    preferred = lab_datasets(engine)[phenomenon]
+    return preferred if any(item["id"] == preferred for item in getattr(getattr(engine, "weather", None),
+        "available", ())) else f"{phenomenon}:continuous"
+
+
+def placement_stem(dataset):
+    return "placement_gain_500m_road200" + ("_direct_p95" if dataset == DIRECT_P95 else "")
+
+
+def cutoff_distribution(values, mask=None):
+    finite = np.empty(0) if values is None else values[np.isfinite(values) & (True if mask is None else mask)]
+    if not len(finite):
+        return dict(cutoffs=[], visible_percent=[], cells=0)
+    ordered = np.sort(finite)
+    cutoffs = np.percentile(ordered, np.arange(100), method="inverted_cdf")
+    visible = 100 * (len(ordered) - np.searchsorted(ordered, cutoffs, side="right")) / len(ordered)
+    return dict(cutoffs=cutoffs.tolist(), visible_percent=visible.tolist(), cells=len(ordered))
 
 
 def default_threshold(profile):
@@ -548,6 +767,27 @@ def combined_range(values, kind):
     return lower, max(upper, lower + 1e-6)
 
 
+def legend_values(mode, minimum, maximum, reduction_max=2, count=5, legend_scale="log"):
+    positions = np.linspace(0, 1, count)
+    if mode in ("affected", "affected_change"):
+        return []
+    if mode in ("uncertainty", "baseline"):
+        values = (minimum + positions * (maximum - minimum) if legend_scale == "linear" else
+                  minimum * np.exp(positions * np.log(maximum / minimum)))
+    elif mode == "placement":
+        values = positions * maximum if legend_scale == "linear" else np.expm1(positions * np.log1p(maximum))
+    elif mode == "change":
+        signed = positions * 2 - 1
+        values = (signed * reduction_max if legend_scale == "linear" else
+                  np.sign(signed) * reduction_max / 2000 * np.expm1(np.abs(signed) * np.log1p(2000)))
+    elif mode == "reduction":
+        values = (positions * reduction_max if legend_scale == "linear" else
+                  reduction_max / 2000 * np.expm1(positions * np.log1p(2000)))
+    else:
+        values = minimum + positions * (maximum - minimum)
+    return values.tolist()
+
+
 class Scenario:
     def __init__(self, engine, baseline=None, dataset="temperature:continuous"):
         self.engine = engine
@@ -562,6 +802,7 @@ class Scenario:
         self.added_sensors = {}
         self.added_positions = {}
         self.pross_only = getattr(engine, "default_pross_only", False)
+        self.include_met = False
         self.station_since = ""
         self.counties = None
         self.network = "frost" if getattr(engine, "weather", None) is not None else "greedy"
@@ -584,17 +825,28 @@ class Scenario:
         profile = self.engine.weather.profile(self.dataset) if getattr(self.engine, "weather", None) is not None else None
         if (profile is not None and self.pross_only and self.network == "frost"
                 and profile.get("baseline") is not None and profile.get("cache_path") is not None):
-            if getattr(self.engine.weather, "portable_manifest", None) is not None:
-                return self.engine.weather.svv_profile(self.dataset)
+            if not self.include_met and getattr(self.engine.weather, "portable_manifest", None) is not None:
+                profile = self.engine.weather.svv_profile(self.dataset)
+                return (dict(profile, allow_nodata=True) if getattr(self.engine, "station_radius_m", 0)
+                        else profile)
+            manifest = getattr(self.engine.weather, "portable_manifest", None)
+            if self.include_met and manifest is not None and manifest["profiles"][self.dataset].get("svv_met"):
+                return self.engine.weather.portable_reference(self.dataset, "svv_met")
             from station_weather import restricted_profile
-            excluded = pross_excluded(profile["stations"])
+            excluded = self.network_excluded(profile["stations"])
             key = (self.dataset, self.engine.cell_m, id(profile["baseline"]), excluded)
             if key not in self._restricted_profiles:
                 cached = restricted_profile(profile, self.engine.cache, excluded)
                 if cached is not None:
                     self._restricted_profiles[key] = cached
-            return self._restricted_profiles.get(key, profile)
-        return profile
+            profile = self._restricted_profiles.get(key, profile)
+        return (dict(profile, allow_nodata=True) if profile is not None and
+                getattr(self.engine, "station_radius_m", 0) else profile)
+
+    def placement_network(self):
+        if self.network != "frost":
+            return self.network
+        return "all" if not self.pross_only else "svv-met" if self.include_met else "svv"
 
     def phenomenon(self):
         profile = self.profile()
@@ -611,17 +863,26 @@ class Scenario:
             return list(additions)
         return [index for index in additions if phenomenon in self.added_sensors.get(index, (phenomenon,))]
 
-    def masked(self):
-        if self.network != "frost" or not self.ready():
+    def station_mask(self, stations, ready):
+        if self.network != "frost" or not ready and not self.include_met:
             return frozenset()
-        stations = self.profile()["stations"]
-        excluded = set(pross_excluded(stations)) if self.pross_only else set()
+        excluded = set(self.network_excluded(stations)) if self.pross_only else set()
         if self.station_since:
             dates = pd.to_datetime(stations.get("last_time", pd.Series("", index=stations.index)),
                                    errors="coerce", utc=True)
             excluded.update(np.flatnonzero(
                 (dates.isna() | (dates < pd.Timestamp(self.station_since, tz="UTC"))).to_numpy()).tolist())
         return frozenset(excluded)
+
+    def network_excluded(self, stations):
+        if self.include_met:
+            return svv_met_excluded(stations, self.engine.station_owner_catalog())
+        return pross_excluded(stations)
+
+    def masked(self):
+        if self.network != "frost" or not self.ready():
+            return frozenset()
+        return self.station_mask(self.profile()["stations"], True)
 
     @staticmethod
     def validate_station_date(value):
@@ -646,7 +907,7 @@ class Scenario:
                                        errors="coerce", utc=True)
                 eligible = set(range(len(stations)))
                 if self.pross_only:
-                    eligible -= set(pross_excluded(stations))
+                    eligible -= set(self.network_excluded(stations))
                 removed = (set(np.flatnonzero((dates.isna() | (dates < pd.Timestamp(value, tz="UTC"))).to_numpy()))
                            & eligible) if value else set()
                 current = set(self.masked()) & eligible
@@ -700,6 +961,13 @@ class Scenario:
     def frost_station(self, station_id):
         """Original row of a Frost station from the first checked layer that contains it."""
         for dataset in self.station_datasets():
+            if callable(getattr(type(self.engine.weather), "station_metadata", None)):
+                metadata = self.engine.weather.station_metadata(dataset, restricted=self.pross_only and not self.include_met)
+                stations = metadata["stations"]
+                matches = np.flatnonzero(stations["station_id"].astype(str).to_numpy() == str(station_id))
+                if len(matches) and int(matches[0]) not in self.station_mask(stations, metadata["ready"]):
+                    return stations.iloc[int(matches[0])]
+                continue
             with self.as_dataset(dataset):
                 if self.profile() is None:
                     continue
@@ -710,9 +978,10 @@ class Scenario:
         return None
 
     def station_datasets(self):
-        available = {item["id"] for item in self.engine.weather.available}
+        available = (self.engine.weather.station_dataset_ids() if callable(getattr(type(self.engine.weather), "station_dataset_ids", None))
+                     else {item["id"] for item in self.engine.weather.available})
         return list(dict.fromkeys([*self.layers, *(
-            dataset for dataset in PHENOMENON_DATASETS.values() if dataset in available)]))
+            dataset for dataset in lab_datasets(self.engine).values() if dataset in available)]))
 
     def attached_proposal(self, station_id):
         original = self.frost_station(station_id)
@@ -799,21 +1068,36 @@ class Scenario:
 
     def fixed(self, include_removed=False):
         if self.network == "frost":
-            stations = self.profile()["stations"].copy()
-            stations["source_index"] = np.arange(len(stations), dtype=np.int32)
-            masked = self.masked()
-            if masked:
-                stations = stations.loc[~stations.source_index.isin(masked)].copy()
-            for index, edit in self.frost_edits.items():
-                if edit.get("removed"):
-                    if not include_removed:
-                        stations = stations.loc[stations.source_index != index].copy()
-                else:
-                    location = self.engine.station(edit["candidate_index"])
-                    for field in ("x", "y", "lon", "lat", "elevation"):
-                        stations.loc[stations.source_index == index, field] = location[field]
-            return stations.reset_index(drop=True)
+            return self.fixed_station_rows(self.profile()["stations"], self.masked(),
+                                           self.frost_edits, include_removed)
         return self.engine.stations.iloc[:0 if self.network == "empty" else self.baseline]
+
+    def fixed_station_rows(self, stations, masked, edits, include_removed):
+        stations = stations.copy()
+        stations["source_index"] = np.arange(len(stations), dtype=np.int32)
+        if masked:
+            stations = stations.loc[~stations.source_index.isin(masked)].copy()
+        for index, edit in edits.items():
+            if edit.get("removed"):
+                if not include_removed:
+                    stations = stations.loc[stations.source_index != index].copy()
+            else:
+                location = self.engine.station(edit["candidate_index"])
+                for field in ("x", "y", "lon", "lat", "elevation"):
+                    stations.loc[stations.source_index == index, field] = location[field]
+        return stations.reset_index(drop=True)
+
+    def station_metadata_rows(self, dataset):
+        profile = self.engine.weather.station_metadata(dataset, restricted=self.pross_only and not self.include_met)
+        stations = profile["stations"]
+        masked = self.station_mask(stations, profile["ready"])
+        lookup = {str(station_id): index for index, station_id in enumerate(stations["station_id"])}
+        edits = {lookup[station_id]: dict(edit) for station_id, edit in self.station_edits.items()
+                 if station_id in lookup and lookup[station_id] not in masked}
+        for station_id, sensors in self.station_sensor_removals.items():
+            if profile["phenomenon"] in sensors and station_id in lookup and lookup[station_id] not in masked:
+                edits[lookup[station_id]] = dict(removed=True)
+        return profile, self.fixed_station_rows(stations, masked, edits, include_removed=True)
 
     def frost_surface(self, omit_index=None, restore_index=None):
         profile = self.profile()
@@ -884,10 +1168,19 @@ class Scenario:
     def limits(self, cell_mask=None):
         profile = self.profile()
         if profile is None:
-            return self.engine.minimum, self.engine.maximum, 2
+            return self.engine.minimum, self.engine.maximum, self.empty_reference_rmse if self.uses_empty_reference() else 2
+        if self.dataset == DIRECT_P95:
+            return (0., 3., self.empty_reference_rmse) if self.uses_empty_reference() else frost_limits(profile)
         profile = colour_reference(self.engine.weather, self.dataset, profile)
         self._colour_reference_warning = profile.get("colour_reference_warning")
-        return frost_limits(profile)
+        limits = frost_limits(profile)
+        if self.uses_empty_reference():
+            limits = (limits[0], limits[1], self.empty_reference_rmse)
+        if (ROAD_COLOUR_CALIBRATION_ENABLED and profile["phenomenon"] == "temperature"
+                and profile.get("baseline") is not None and hasattr(self.engine, "road_colour_limits")):
+            minimum, maximum = self.engine.road_colour_limits(profile)
+            return minimum, maximum, limits[2]
+        return limits
 
     def selection(self):
         if self.selected is not None:
@@ -1029,7 +1322,8 @@ class Scenario:
         profile = self.profile()
         selected = self.selection()
         key = (id(self.engine), self.engine.cell_m, self.dataset, self.network, self.baseline, self.comparison_scope,
-               tuple((index, self.added_sensors.get(index)) for index in self.added), self.pross_only, self.station_since,
+               self.empty_reference_rmse,
+               tuple((index, self.added_sensors.get(index)) for index in self.added), self.pross_only, self.include_met, self.station_since,
                None if selected is None else (selected["kind"], selected["index"], selected.get("station_id")),
                              tuple((index, tuple(sorted(edit.items()))) for index, edit in sorted(self.frost_edits.items())),
                None if profile is None else id(profile.get("baseline")),
@@ -1041,6 +1335,16 @@ class Scenario:
 
     def compares_baseline(self):
         return self.network == "frost" and self.comparison_scope == "baseline"
+
+    @property
+    def empty_reference_rmse(self):
+        return 1.0 if self.dataset == DIRECT_P95 else EMPTY_REFERENCE_RMSE
+
+    def uses_empty_reference(self):
+        if self.network != "empty" or self.phenomenon() != "temperature":
+            return False
+        profile = self.profile()
+        return profile is None or profile["metric"] in ("RMSE", "P95")
 
     def comparison_kind(self):
         if self.compares_baseline():
@@ -1056,6 +1360,10 @@ class Scenario:
         return self.comparison_kind() != "contribution"
 
     def comparison_method(self):
+        if self.uses_empty_reference():
+            if self.dataset == DIRECT_P95:
+                return "Mål på ±1 °C minus scenariets anslåtte 95 %-grense, bare positiv differanse; ikke målt usikkerhet i tomt nett"
+            return f"Antatt referansefeil {self.empty_reference_rmse:g} °C minus scenariet, bare positiv reduksjon; ikke målt feil i tomt nett"
         return {
             "baseline": "Opprinnelig Frost-grunnnett minus scenariet",
             "move": "Bare valgt flytting: opprinnelig plassering minus ny plassering; andre endringer beholdes",
@@ -1125,28 +1433,32 @@ class Scenario:
         self._combined[key] = (total, kind)
         return self._combined[key]
 
-    def _calculate_change(self):
+    def surface_difference(self, before, current):
         profile = self.profile()
-        def difference(before, current):
-            if before is None or current is None:
-                return None
-            if profile is not None and profile.get("allow_nodata"):
-                result = np.full(current.shape, np.nan, np.float32)
-                np.subtract(before, current, out=result, where=np.isfinite(before) & np.isfinite(current))
-                return result
-            return before - current
+        if before is None or current is None:
+            return None
+        if profile is not None and profile.get("allow_nodata"):
+            result = np.full(current.shape, np.nan, np.float32)
+            np.subtract(before, current, out=result, where=np.isfinite(before) & np.isfinite(current))
+            return result
+        return before - current
 
+    def _calculate_change(self):
         if not self.ready():
             return None, None, None
         current = self.surface()
+        if self.uses_empty_reference():
+            before = None if current is None else np.full(current.shape, self.empty_reference_rmse, dtype=np.float32)
+            delta = self.surface_difference(before, current)
+            return current, before, None if delta is None else np.maximum(delta, 0)
         if self.compares_baseline():
             before = self.reference()
             before = None if before is None else before.copy()
-            return current, before, difference(before, current)
+            return current, before, self.surface_difference(before, current)
         selected = self.selection()
         if self.comparison_kind() in ("move", "removal"):
             restored = self.surface(restore_index=selected["index"])
-            return current, restored, difference(restored, current)
+            return current, restored, self.surface_difference(restored, current)
         if selected is not None and selected["kind"] == "greedy":
             index = selected["index"]
             if self.baseline == 1 and not self.added:
@@ -1168,7 +1480,7 @@ class Scenario:
                 before[targets] = competing
         else:
             before = self.surface(omit=selected) if selected is not None else current
-        delta = difference(before, current)
+        delta = self.surface_difference(before, current)
         reduction = None if delta is None else np.maximum(delta, 0)
         return current, before, reduction
 
@@ -1393,6 +1705,7 @@ class Scenario:
                 raise ValueError("Stasjonsantallet er utenfor den lagrede stasjonsrekken")
             self.baseline = baseline
             self.network = "greedy"
+            self.include_met = False
             self.added.clear()
             self.frost_edits.clear()
             self.station_edits.clear()
@@ -1400,7 +1713,12 @@ class Scenario:
         elif action == "network":
             network = data["value"]
             pross_only = data.get("pross_only", self.pross_only)
-            if network == "svv":
+            include_met = network == "svv_met"
+            if include_met:
+                catalog = self.engine.station_owner_catalog() if hasattr(self.engine, "station_owner_catalog") else None
+                if catalog is None:
+                    raise ValueError("Stasjonseiere mangler for Vegværstasjoner + MET-stasjoner")
+            if network in ("svv", "svv_met"):
                 network, pross_only = "frost", True
             if network not in ("frost", "greedy", "empty"):
                 raise ValueError("Ukjent grunnett")
@@ -1410,6 +1728,7 @@ class Scenario:
                 raise ValueError("Ingen Frost-database er tilgjengelig")
             self.network = network
             self.pross_only = pross_only
+            self.include_met = include_met
             self.added.clear()
             self.frost_edits.clear()
             self.station_edits.clear()
@@ -1434,8 +1753,9 @@ class Scenario:
                 #     raise ValueError("Ukjent værfenomen")
                 # if PHENOMENON_DATASETS[phenomenon] not in available:
                 #     raise ValueError("Ingen ferdig modell for valgt værfenomen")
-                if PHENOMENON_DATASETS[phenomenon] not in layers:
-                    layers.append(PHENOMENON_DATASETS[phenomenon])
+                dataset = lab_datasets(self.engine)[phenomenon]
+                if dataset not in layers:
+                    layers.append(dataset)
             for dataset in layers:
                 self.engine.weather.profile(dataset)
             if self.dataset in layers:
@@ -1456,6 +1776,7 @@ class Scenario:
             if self.network != "frost":
                 raise ValueError("SVV-filteret krever MET-stasjonsnettet")
             self.pross_only = bool(data["value"])
+            self.include_met = False
             self.sync_edits()
             self.selected = None
         elif action == "station_since":
@@ -1563,9 +1884,13 @@ class Scenario:
             for dataset in self.station_datasets():
                 if dataset == self.dataset:
                     continue
-                with self.as_dataset(dataset):
-                    phenomenon, stations = self.phenomenon(), self.fixed(include_removed=True)
-                    layer_profile = self.profile()
+                if callable(getattr(type(self.engine.weather), "station_metadata", None)):
+                    layer_profile, stations = self.station_metadata_rows(dataset)
+                    phenomenon = layer_profile["phenomenon"]
+                else:
+                    with self.as_dataset(dataset):
+                        phenomenon, stations = self.phenomenon(), self.fixed(include_removed=True)
+                        layer_profile = self.profile()
                 for row in stations.to_dict("records"):
                     station_id = str(row["station_id"])
                     marker = by_id.get(station_id)
@@ -1651,9 +1976,11 @@ class Scenario:
                         sensors=list(self.added_sensors.get(index, self.layer_phenomena())))
 
         return dict(
+            station_radius_m=getattr(self.engine, "station_radius_m", 0),
             station_owners=owners,
             revision=self.revision, baseline=self.baseline, maximum_baseline=len(self.engine.stations),
-            threshold=self.threshold, cell_m=self.engine.cell_m, bounds=self.engine.bounds,
+            threshold=self.threshold, empty_reference_rmse=self.empty_reference_rmse,
+            cell_m=self.engine.cell_m, bounds=self.engine.bounds,
             resolutions=[1000, 2500, 5000] if hasattr(self.engine, "at_resolution") else [self.engine.cell_m],
             dataset=self.dataset, layers=list(self.layers),
             layer_labels=[] if profile is None else [next(item["label"] for item in self.engine.weather.available
@@ -1661,7 +1988,7 @@ class Scenario:
             layer_options=[] if profile is None else [
                 dict(phenomenon=phenomenon, dataset=dataset,
                      available=any(item["id"] == dataset for item in self.engine.weather.available))
-                for phenomenon, dataset in PHENOMENON_DATASETS.items()],
+                for phenomenon, dataset in lab_datasets(self.engine).items()],
             network=self.network, fixed_count=len(fixed), frost_edits=frost_edits,
             frost_ready=self.ready(), frost_precompute=status,
             precompute_jobs=self.engine.frost_statuses() if hasattr(self.engine, "frost_statuses") else [],
@@ -1687,7 +2014,8 @@ class Scenario:
             comparison_method=self.comparison_method(),
             selected_station=selected, selected_station_label=selected_label,
             stations=[manual_station(index) for index in self.added],
-            pross_only=self.pross_only, pross_available=True,
+            pross_only=self.pross_only, include_met=self.include_met, pross_available=True,
+            met_available=owner_catalog is not None,
             station_since=self.station_since, counties=self.counties,
             masked_count=len(self.masked()), combine=self.combine,
             missing_layers=[] if profile is None else [
@@ -1726,6 +2054,9 @@ class Scenario:
         raster_metadata = dict(station_count=len(fixed) + len(self.added),
                                comparison=self.comparison_kind(), comparison_scope=self.comparison_scope,
                                threshold=self.threshold, weather_mode=self.dataset, cell_size_m=engine.cell_m)
+        if self.uses_empty_reference():
+            raster_metadata["empty_reference_rmse"] = self.empty_reference_rmse
+            raster_metadata["contribution_method"] = self.comparison_method()
         if profile is not None and profile.get("allow_nodata"):
             raster_metadata["model_warning"] = profile["model_warning"]
         buffer = BytesIO()
@@ -1759,6 +2090,7 @@ class Scenario:
             pyogrio.write_dataframe(features, root / "stations.gpkg", layer="stations", driver="GPKG")
             (root / "scenario.json").write_text(json.dumps(dict(
                 dataset=self.dataset, unit=unit, threshold=self.threshold, network=self.network,
+                empty_reference_rmse=self.empty_reference_rmse if self.uses_empty_reference() else None,
                 model_warning=self.state()["model_warning"], training_period=self.state()["training_period"],
                 baseline_method=self.state()["baseline_method"],
                 selected_station=self.selection(), affected_area_km2=self.state()["affected_area_km2"],
@@ -1774,12 +2106,21 @@ class Scenario:
 
 
 def create_app(engine, road_network=None, initial_dataset="temperature:continuous", kuldehull_layer=None):
+    from station_placement_tiles import PlacementTiles, raster_payload, tile_bounds
+    placement_tiles = (getattr(engine.root, "placement_tiles", None) if isinstance(engine, StationEngine) else None)
+    if placement_tiles is None:
+        placement_tiles = PlacementTiles(OUT / "station_app_cache" / "placement_tiles"
+                                         if isinstance(engine, StationEngine) else None)
+    from station_road_background import ROAD_BACKGROUND, RoadBackground
     from station_coverage import CoverageLayer
     coverage = CoverageLayer(ASSET_ROOT, HERE)
     from station_climate import ClimateZones
     climate = ClimateZones(HERE / "data" / "klimasoner.tif", OUT / "station_app_cache" / "climate")
     from station_counties import CountyMask
     county_layer = CountyMask(HERE / "data" / "Basisdata_0000_Norge_25833_Fylker_FGDB.gdb")
+    background_roads = RoadBackground(next(
+        (root / ROAD_BACKGROUND for root in (ASSET_ROOT, HERE) if (root / ROAD_BACKGROUND).is_file()),
+        HERE / ROAD_BACKGROUND), counties=county_layer)
     app = Flask(__name__)
     app.secret_key = secrets.token_hex(32)
     app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", MAX_CONTENT_LENGTH=4096)
@@ -1794,6 +2135,24 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
     road_lock = threading.Lock()
     map_images = OrderedDict()
     image_lock = threading.Lock()
+    weather_tile_layers = OrderedDict()
+    weather_tile_lock = threading.Lock()
+    p95_root = next((root for root in (HERE, ASSET_ROOT)
+                     if (root / "outputs" / "senorge_30yr_p95_overlay" / "manifest.json").is_file()), HERE)
+    p95_out = p95_root / "outputs"
+    p95_folder = p95_out / "senorge_30yr_p95_overlay"
+    p95_model = p95_folder / "results_jobs14" / "xgboost_with_basins.ubj"
+    p95_receipt = p95_model.with_suffix(".json")
+    p95_manifest = p95_folder / "manifest.json"
+    p95_basins = p95_folder / "grid_features.csv.gz"
+    comparison_10m_targets = ("rmse", "absolute-error-p95", "direct-rmse", "direct-p95")
+    comparison_10m = p95_out / "senorge_results_10m"
+    comparison_10m_models = {
+        f"10m-{target}": comparison_10m / "results" / target / "xgboost_with_basins.ubj"
+        for target in comparison_10m_targets
+    }
+    p95_lock = threading.Lock()
+    p95_maps = {}
     cold_basins = (kuldehull_layer if kuldehull_layer is not None else
                    KuldehullLayer(OUT / "potential_lakes_norway_DTM10_sill20_tiled" / "potential_lakes.gpkg"))
 
@@ -1811,14 +2170,20 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
                                            portable_cache=engine.cell_m == 500)
             return road_network
 
-    def road_mask(current, settings):
-        county = county_layer.cells(current.engine, current.counties) if current.counties is not None else None
+    if hasattr(engine, "root"):
+        engine.root.road_network_provider = roads
+        engine.root.road_calibration_lock = threading.Lock()
+        engine.root.road_calibration_limits = {}
+
+    def road_mask(current, settings, active=None):
+        active = current.engine if active is None else active
+        county = county_layer.cells(active, current.counties) if current.counties is not None else None
         if settings is None or not settings.get("corridor", False):
             return county
         if current.counties is not None:
             settings = dict(settings, _county_key=tuple(current.counties),
                             _county_geometry=county_layer.geometry(tuple(current.counties)))
-        road = roads().corridor_mask(current.engine, settings["bounds"], settings,
+        road = roads().corridor_mask(active, settings["bounds"], settings,
                                       settings.get("distance_m", 1000))
         return road if county is None else road & county
 
@@ -1840,8 +2205,29 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             raise ValueError("RMSE-grensen må være endelig og ikke negativ")
         return result
 
+    def finish_image(current, image, kuldehull, numeric=False):
+        lake_only = kuldehull and kuldehull["only"]
+        if numeric:
+            pixels, values = image
+            if not lake_only and current.counties is None:
+                return BytesIO(raster_payload(pixels, values))
+            image = BytesIO()
+            Image.fromarray(pixels).save(image, format="PNG")
+            image.seek(0)
+            if lake_only and "viewport" in kuldehull:
+                values = np.asarray(cold_basins.viewport_image(
+                    Image.fromarray(values), current.engine, kuldehull["viewport"]))
+        if lake_only:
+            image = cold_basins.clip(image, current.engine, kuldehull["depth"],
+                                     **({"viewport": kuldehull["viewport"]} if "viewport" in kuldehull else {}))
+        image = county_image(current, image, kuldehull)
+        if numeric:
+            with Image.open(image) as clipped:
+                return BytesIO(raster_payload(np.asarray(clipped), values))
+        return image
+
     def draw(current, values, mode, settings=None, display_size=None, kuldehull=None,
-             rmse_min=0, rmse_values=None):
+             rmse_min=0, rmse_values=None, numeric=False, map_scale="log"):
         mask = road_mask(current, settings)
         if rmse_min > 0 and not mode.startswith("terrain:"):
             errors = rmse_values if rmse_values is not None else (
@@ -1853,14 +2239,16 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             values, mode = current.map_change(values, mode)
         limits = () if mode.startswith("terrain:") else current.limits(mask)
         options = {} if display_size is None else dict(display_size=display_size)
-        if mask is None:
-            image = current.engine.render(values, mode, *limits, **options)
-        else:
-            image = current.engine.render(values, mode, *limits, cell_mask=mask, **options)
-        if kuldehull and kuldehull["only"] and not mode.startswith("terrain:"):
-            image = cold_basins.clip(image, current.engine, kuldehull["depth"],
-                                     **({"viewport": kuldehull["viewport"]} if "viewport" in kuldehull else {}))
-        return county_image(current, image, kuldehull)
+        if numeric:
+            options["filter_missing"] = True
+        if mode in ("uncertainty", "baseline") and current.dataset == DIRECT_P95:
+            options["map_scale"] = "direct_p95"
+        elif map_scale == "linear":
+            options["map_scale"] = map_scale
+        render = current.engine._render_pixels if numeric else current.engine.render
+        image = (render(values, mode, *limits, cell_mask=mask, **options) if mask is not None else
+                 render(values, mode, *limits, **options))
+        return finish_image(current, image, None if mode.startswith("terrain:") else kuldehull, numeric)
 
     def parse_road_settings(settings):
         if settings is None:
@@ -1875,7 +2263,7 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             raise ValueError("Vegfilteret må være et JSON-objekt")
         return settings
 
-    def combined_image(current, mode, settings, display_size, kuldehull):
+    def combined_image(current, mode, settings, display_size, kuldehull, numeric=False):
         values, kind = current.combined(mode)
         mask = road_mask(current, parse_road_settings(settings))
         cutoff = minimum_rmse(request.args.get("rmse_min", 0))
@@ -1887,11 +2275,14 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
         options = dict(cell_mask=mask) if mask is not None else {}
         if display_size is not None:
             options["display_size"] = display_size
-        image = current.engine.render(values, kind, *combined_range(values, kind), 1, **options)
-        if kuldehull and kuldehull["only"]:
-            image = cold_basins.clip(image, current.engine, kuldehull["depth"],
-                                     **({"viewport": kuldehull["viewport"]} if "viewport" in kuldehull else {}))
-        response = send_file(county_image(current, image, kuldehull), mimetype="image/png", max_age=0)
+        if numeric:
+            options["filter_missing"] = True
+        render = current.engine._render_pixels if numeric else current.engine.render
+        image = render(values, kind, *combined_range(values, kind), 1, **options)
+        response = send_file(finish_image(current, image, kuldehull, numeric),
+                             mimetype="application/octet-stream" if numeric else "image/png", max_age=0)
+        if numeric:
+            response.headers["Content-Encoding"] = "gzip"
         response.headers["X-Map-Cache"] = "MISS"
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -1901,7 +2292,7 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
         parts = []
         for dataset in current.layers:
             try:
-                layer = active.placement_layer(dataset)
+                layer = active.placement_layer(dataset, prefer_road=False)
             except (OSError, ValueError, KeyError):
                 continue
             parts.append(np.clip(np.log1p(np.maximum(layer["values"], 0)) / np.log1p(layer["maximum"]), 0, 1))
@@ -1927,7 +2318,54 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
                 values = values[mask]
             minimum, maximum = combined_range(values, kind)
             return jsonify(minimum=minimum, maximum=maximum, kind=kind, method=current.combine,
-                           revision=current.revision)
+                           revision=current.revision, **cutoff_distribution(values))
+
+    @app.get("/api/legend")
+    def colour_legend():
+        mode = request.args.get("mode", "uncertainty")
+        legend_scale = request.args.get("legend_scale", "log")
+        try:
+            count = int(request.args.get("count", "5"))
+        except ValueError:
+            raise ValueError("Antall tall på fargeskalaen må være mellom 2 og 5") from None
+        if not 2 <= count <= 5:
+            raise ValueError("Antall tall på fargeskalaen må være mellom 2 og 5")
+        if not mode.startswith("terrain:") and mode not in ("uncertainty", "baseline", "reduction", "affected", "placement"):
+            raise ValueError("Ukjent kartlag")
+        if legend_scale not in ("log", "linear"):
+            raise ValueError("Ukjent fargeskala")
+        if legend_scale == "linear" and mode not in ("uncertainty", "baseline", "reduction", "placement"):
+            raise ValueError("Lineær fargeskala støttes ikke for dette kartlaget")
+        current = scenario()
+        with current.lock:
+            if legend_scale == "linear" and len(current.layers) != 1:
+                raise ValueError("Lineær fargeskala støttes for ett værfenomen om gangen")
+            kind, reduction_max = mode, 2
+            profile = current.profile()
+            unit = "°C" if profile is None else profile["unit"]
+            if mode.startswith("terrain:"):
+                layer = current.engine.terrain_layer(mode.split(":", 1)[1])
+                minimum, maximum, unit = layer["minimum"], layer["maximum"], layer["unit"]
+            elif mode == "placement":
+                if len(current.layers) > 1:
+                    _, values = combined_placement(current)
+                    kind, unit = "combined_reduction", "normalisert"
+                    minimum, maximum = combined_range(values, kind)
+                else:
+                    layer = current.engine.placement_layer(current.dataset, station_network=current.placement_network())
+                    minimum, maximum, unit = layer["minimum"], layer["maximum"], layer["unit"]
+            elif len(current.layers) > 1:
+                values, kind = current.combined(mode)
+                minimum, maximum = combined_range(values, kind)
+                unit = "normalisert"
+            else:
+                minimum, maximum, reduction_max = current.limits()
+                if mode in ("reduction", "affected"):
+                    _, kind = current.map_change(None, mode)
+            if kind in ("uncertainty", "baseline") and len(current.layers) == 1 and current.dataset == DIRECT_P95:
+                return jsonify(values=[0., 1., 3.], unit=unit, revision=current.revision, fixed=True)
+            return jsonify(values=legend_values(kind, minimum, maximum, reduction_max, count, legend_scale),
+                           unit=unit, revision=current.revision)
 
     def scenario():
         with registry_lock:
@@ -1970,13 +2408,262 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             return jsonify(jobs=engine.frost_statuses() if hasattr(engine, "frost_statuses") else [],
                            calculation=read_progress(HERE))
 
+    def p95_available():
+        return (isinstance(engine, StationEngine) and engine.weather is not None
+                and "temperature:senorge30" in engine.weather.station_dataset_ids()
+                and (p95_out / "norway_grid_1000m.gpkg").is_file()
+                and all(path.is_file() for path in (p95_model, p95_receipt, p95_manifest, p95_basins)))
+
+    @app.get("/api/p95/available")
+    def p95_availability():
+        available = p95_available()
+        return jsonify(available=available, **({"models_10m": True} if available and has_comparison_10m() else {}))
+
+    def has_comparison_10m():
+        return (all((comparison_10m / name).is_file() for name in ("manifest.json", "grid_features.csv.gz"))
+                and all(model.is_file() and model.with_suffix(".json").is_file()
+                        and model.with_name("summary.json").is_file()
+                        for model in comparison_10m_models.values()))
+
+    @app.get("/api/p95", defaults={"metric": None})
+    @app.get("/api/p95/<metric>.bin")
+    def p95_overlay(metric):
+        if not p95_available():
+            return jsonify(error="P95-modellen er ikke installert"), 404
+        if metric is not None and metric not in ("rmse", "p95", "gap") and metric not in comparison_10m_models:
+            return jsonify(error="Ukjent temperatursammenligning"), 404
+        larger = metric in comparison_10m_models or (metric is None and request.args.get("sample") == "10m")
+        if larger and not has_comparison_10m():
+            return jsonify(error="Modellene med 10 millioner par er ikke installert"), 404
+        with p95_lock:
+            if larger not in p95_maps:
+                from file_hash import sha256
+                from station_senorge import BasinLookup, PAIR_FEATURES, SeNorgePairModel, p95_reference_values
+                manifest = json.loads(p95_manifest.read_text(encoding="utf-8"))
+                receipt = json.loads(p95_receipt.read_text(encoding="utf-8"))
+                if (manifest["target_metric"] != "absolute-error-p95"
+                        or manifest["features"] != PAIR_FEATURES or receipt["features"] != PAIR_FEATURES
+                        or receipt["file_sha256"].get(p95_model.name) != sha256(p95_model)):
+                    raise ValueError("P95-modellens mål, egenskaper eller kontrollsum stemmer ikke")
+                dataset = "temperature:senorge30"
+                with ExitStack() as stack:
+                    if p95_root == engine.data_root:
+                        active = engine.at_resolution(1000)
+                    else:
+                        active = StationEngine(p95_out / "uncertainty_surfaces_1000m.npy",
+                                               cell_m=1000, data_root=p95_root)
+                        stack.callback(active.resources.close)
+                    profile = active.weather.profile(dataset)
+                    if profile["winner"] is None:
+                        return jsonify(error="Temperaturens 1 km-grunnflate må beregnes før P95 kan vises"), 503
+                    basin_path = p95_out / "potential_lakes_norway_DTM10_sill20_tiled" / "potential_lakes.gpkg"
+                    sources = make_cache(profile["stations"])
+                    winners = profile["winner"]
+                    if larger:
+                        larger_manifest = json.loads((comparison_10m / "manifest.json").read_text(encoding="utf-8"))
+                        if (larger_manifest["pairs"] != 10_000_000 or larger_manifest["features"] != PAIR_FEATURES
+                                or larger_manifest["maximum_distance_m"] != manifest["maximum_distance_m"]):
+                            raise ValueError("10-millionerspakken har uventet ruteparutvalg eller egenskaper")
+                        basins = BasinLookup(comparison_10m / "grid_features.csv.gz", basin_path)
+                        surfaces = {}
+                        for key, path in comparison_10m_models.items():
+                            receipt = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+                            summary = json.loads(path.with_name("summary.json").read_text(encoding="utf-8"))
+                            if (summary["status"] != "complete" or summary["target_metric"] != key.removeprefix("10m-")
+                                    or summary["dataset_sha256"] != larger_manifest["dataset_sha256"]
+                                    or summary["experiments"]["xgboost_with_basins"] != receipt
+                                    or receipt["features"] != PAIR_FEATURES
+                                    or receipt["file_sha256"].get(path.name) != sha256(path)):
+                                raise ValueError(f"Ugyldig modell eller kontrollsum: {key}")
+                            surfaces[key] = p95_reference_values(
+                                SeNorgePairModel(path, basins), sources, active.cache, winners,
+                                larger_manifest["maximum_distance_m"])
+                    else:
+                        model = SeNorgePairModel(p95_model, BasinLookup(p95_basins, basin_path))
+                        values = p95_reference_values(model, sources, active.cache, winners,
+                                                      manifest["maximum_distance_m"])
+                        rmse = profile["baseline"]
+                        surfaces = dict(rmse=rmse, p95=values, gap=values - 1.96 * rmse)
+                    valid = np.isfinite(profile["baseline"])
+                    for surface in surfaces.values():
+                        valid &= np.isfinite(surface)
+                    if not valid.any():
+                        raise ValueError("Ingen ruter med gyldige sammenligningsverdier")
+                    images, limits = {}, {}
+                    for key, surface in surfaces.items():
+                        gap = key == "gap"
+                        scores = np.abs(surface[valid]) if gap else surface[valid]
+                        if gap:
+                            maximum = max(float(np.percentile(scores, 99.5)), 0.0001)
+                            minimum = -maximum
+                        else:
+                            positive = scores[scores > 0]
+                            if positive.size == 0:
+                                raise ValueError(f"Ingen positive {key.upper()}-verdier for fargeskalaen")
+                            lower, upper = np.percentile(positive, [0.5, 99.5])
+                            minimum = max(float(lower), 0.0001)
+                            maximum = max(float(upper), minimum * 1.01)
+                        limits[key] = dict(minimum=minimum, maximum=maximum,
+                                           cutoffs=np.percentile(scores, np.arange(100)).tolist())
+                        pixels, projected = active._render_pixels(
+                            surface, "comparison_gap" if gap else "uncertainty", minimum, maximum,
+                            cell_mask=valid, display_size=1600)
+                        images[key] = raster_payload(pixels, np.abs(projected) if gap else projected)
+                    p95_maps[larger] = (dict(bounds=active.bounds, limits=limits, cell_m=1000,
+                                           cells=int(valid.sum()), urls={key: f"/api/p95/{key}.bin" for key in images}),
+                                      images)
+            metadata, images = p95_maps[larger]
+        if metric is not None:
+            response = send_file(BytesIO(images[metric]), mimetype="application/octet-stream", max_age=0)
+            response.headers["Content-Encoding"] = "gzip"
+            return response
+        return jsonify(metadata)
+
     @app.get("/api/placement")
     def placement_metadata():
         current = scenario()
         with current.lock:
-            active = current.engine.at_resolution(5000)
-            layer = active.placement_layer(current.dataset)
-            return jsonify({key: value for key, value in layer.items() if key != "values"})
+            layer = current.engine.placement_layer(current.dataset, station_network=current.placement_network())
+            result = {key: value for key, value in layer.items() if key != "values"}
+            active = current.engine.at_resolution(layer["cell_m"])
+            result["tile_version"] = placement_tiles.version(active, layer)
+            return jsonify(result)
+
+    @app.get("/api/placement/tiles/<int:z>/<int:x>/<int:y>.png", defaults={"numeric": False})
+    @app.get("/api/placement/tiles/<int:z>/<int:x>/<int:y>.bin", defaults={"numeric": True})
+    def placement_tile(z, x, y, numeric):
+        tile_bounds(z, x, y)
+        map_scale = request.args.get("map_scale", "log")
+        if map_scale not in ("log", "linear"):
+            raise ValueError("Ukjent kartskala")
+        dataset = request.args.get("dataset", initial_dataset)
+        network = request.args.get("network", "svv")
+        layer = engine.placement_layer(dataset, station_network=network)
+        active = engine.at_resolution(layer["cell_m"])
+        version = placement_tiles.version(active, layer)
+        if request.args.get("version") != version:
+            return jsonify(error="Plasseringskartet er endret. Last siden på nytt."), 409
+        cutoff = minimum_rmse(request.args.get("rmse_min", 0))
+        if numeric and cutoff:
+            raise ValueError("Tallfliser filtreres i nettleseren, ikke på serveren")
+        settings = parse_road_settings(request.args.get("roads"))
+        if settings is not None:
+            settings = {key: value for key, value in settings.items() if key != "bounds"}
+            roads().filters(settings)
+            distance = float(settings.get("distance_m", 1000))
+            if not np.isfinite(distance) or not 0 <= distance <= 5000:
+                raise ValueError("Vegkorridoren må være mellom 0 og 5000 meter")
+            if not isinstance(settings.get("corridor", False), bool):
+                raise ValueError("Ugyldig lagfilter")
+            if not settings.get("corridor", False):
+                settings = None
+        requested_counties = json.loads(request.args.get("counties", "null"))
+        selection = county_layer.selection(requested_counties) if requested_counties is not None else None
+        counties = None if selection is None else tuple(selection)
+
+        def corridor(active, data):
+            if counties is not None:
+                data = dict(data, _county_key=counties, _county_geometry=county_layer.geometry(counties))
+            return roads().corridor_mask(active, data["bounds"], data, data.get("distance_m", 1000))
+
+        def clip(image, bounds):
+            return county_layer.clip_image(image, bounds, counties) if counties is not None else image
+
+        image, hit = placement_tiles.image(active, layer, version, z, x, y, cutoff, settings,
+                                           counties, corridor, clip, numeric=numeric, map_scale=map_scale)
+        response = send_file(BytesIO(image), mimetype="application/octet-stream" if numeric else "image/png", max_age=3600)
+        if numeric:
+            response.headers["Content-Encoding"] = "gzip"
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        response.headers["X-Map-Cache"] = "HIT" if hit else "MISS"
+        return response
+
+    def weather_tile_layer(current, mode):
+        key = (id(current), current.revision, current.dataset, tuple(current.layers), current.combine, mode)
+        with weather_tile_lock:
+            cached = weather_tile_layers.get(key)
+            if cached is not None:
+                weather_tile_layers.move_to_end(key)
+                return cached
+        if len(current.layers) > 1:
+            values, render_mode = current.combined(mode)
+            minimum, maximum = combined_range(values, render_mode)
+            reduction_max = 1
+        else:
+            if mode == "baseline" and current.network == "frost":
+                values = current.reference()
+            elif mode in ("uncertainty", "baseline"):
+                values = current.base() if mode == "baseline" or not current.added else current.surface()
+            else:
+                _, _, values = current.change()
+                values, render_mode = current.map_change(values, mode)
+            minimum, maximum, reduction_max = current.limits()
+            if mode in ("uncertainty", "baseline"):
+                render_mode = mode
+        layer = dict(source=f"scenario-{mode}-{render_mode}", render_mode=render_mode,
+                     source_version=[current.revision, current.dataset, tuple(current.layers), current.combine],
+                     minimum=minimum, maximum=maximum, reduction_max=reduction_max, values=values)
+        with weather_tile_lock:
+            weather_tile_layers[key] = layer
+            while len(weather_tile_layers) > 8:
+                weather_tile_layers.popitem(last=False)
+        return layer
+
+    @app.get("/api/map/tiles/<int:z>/<int:x>/<int:y>.bin")
+    def weather_tile(z, x, y):
+        tile_bounds(z, x, y)
+        mode = request.args.get("mode", "uncertainty")
+        if mode not in ("uncertainty", "baseline", "reduction"):
+            raise ValueError("Ukjent kartlag for kartflis")
+        current = scenario()
+        with current.lock:
+            if (request.args.get("revision", type=int) != current.revision or
+                    request.args.get("dataset") != current.dataset):
+                return jsonify(error="Stasjonsscenariet er endret. Last kartet på nytt."), 409
+            active = current.engine
+            layer = weather_tile_layer(current, mode)
+            version = placement_tiles.version(active, layer)
+            settings = parse_road_settings(request.args.get("roads"))
+            if settings is not None:
+                settings = {key: value for key, value in settings.items() if key != "bounds"}
+                roads().filters(settings)
+                distance = float(settings.get("distance_m", 1000))
+                if not np.isfinite(distance) or not 0 <= distance <= 5000:
+                    raise ValueError("Vegkorridoren må være mellom 0 og 5000 meter")
+                if not isinstance(settings.get("corridor", False), bool):
+                    raise ValueError("Ugyldig lagfilter")
+                if not settings.get("corridor", False):
+                    settings = None
+            selection = county_layer.selection(current.counties) if current.counties is not None else None
+            counties = None if selection is None else tuple(selection)
+
+            def corridor(active, data):
+                if counties is not None:
+                    data = dict(data, _county_key=counties, _county_geometry=county_layer.geometry(counties))
+                return roads().corridor_mask(active, data["bounds"], data, data.get("distance_m", 1000))
+
+            def clip(image, bounds):
+                return county_layer.clip_image(image, bounds, counties) if counties is not None else image
+
+            map_scale = "direct_p95" if mode in ("uncertainty", "baseline") and current.dataset == DIRECT_P95 else "log"
+            image, hit = placement_tiles.image(active, layer, version, z, x, y, 0, settings,
+                                               counties, corridor, clip, numeric=True, map_scale=map_scale,
+                                               render_mode=layer["render_mode"])
+        response = send_file(BytesIO(image), mimetype="application/octet-stream", max_age=3600)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        response.headers["X-Map-Cache"] = "HIT" if hit else "MISS"
+        return response
+
+    @app.get("/api/placement/point")
+    def placement_point():
+        current = scenario()
+        with current.lock:
+            layer = current.engine.placement_layer(current.dataset, station_network=current.placement_network())
+            active = current.engine.at_resolution(layer["cell_m"])
+            index = active.target_index(float(request.args["lon"]), float(request.args["lat"]))
+            return jsonify(value=float(layer["values"][index]), unit=layer["unit"],
+                           cell_m=layer["cell_m"], road_distance_m=layer.get("road_distance_m"))
 
     @app.get("/api/counties")
     def county_options():
@@ -1995,29 +2682,62 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
     @app.get("/api/placement.png")
     def placement_image():
         current = scenario()
+        map_scale = request.args.get("map_scale", "log")
+        if map_scale not in ("log", "linear"):
+            raise ValueError("Ukjent kartskala")
         size = request.args.get("size", 800, type=int)
         if size not in (400, 800, 1600):
             raise ValueError("Ugyldig bildeoppløsning")
+        cutoff = minimum_rmse(request.args.get("rmse_min", 0))
+        settings = parse_road_settings(request.args.get("roads"))
         with current.lock:
-            active = current.engine.at_resolution(5000)
             if len(current.layers) > 1:
+                if map_scale == "linear":
+                    raise ValueError("Lineær kartskala støttes for ett værfenomen om gangen")
                 active, total = combined_placement(current)
+                mask = road_mask(current, settings, active) if settings is not None else None
+                if cutoff > 0:
+                    gain_mask = np.isfinite(total) & (total > cutoff)
+                    mask = gain_mask if mask is None else mask & gain_mask
+                options = dict(cell_mask=mask) if mask is not None else {}
                 response = send_file(county_image(current, active.render(total, "combined_reduction",
-                                                   *combined_range(total, "combined_reduction"), 1, display_size=size), active=active),
+                                                   *combined_range(total, "combined_reduction"), 1, display_size=size, **options), active=active),
                                      mimetype="image/png", max_age=0)
                 response.headers["Cache-Control"] = "no-store"
                 return response
-            layer = active.placement_layer(current.dataset)
-            key = ("placement", id(active), id(layer["values"]), size)
+            layer = current.engine.placement_layer(current.dataset, station_network=current.placement_network())
+            active = current.engine.at_resolution(layer["cell_m"])
+            viewport = json.loads(request.args["bounds"]) if "bounds" in request.args else None
+            if viewport is not None and (not isinstance(viewport, list) or len(viewport) != 4):
+                raise ValueError("Ugyldig kartutsnitt")
+            key = ("placement", id(active), id(layer["values"]), size,
+                   tuple(viewport) if viewport is not None else None, cutoff,
+                   map_scale,
+                   json.dumps(settings, sort_keys=True) if settings is not None else None,
+                   tuple(current.counties) if settings is not None and current.counties is not None else None)
             with image_lock:
                 hit = key in map_images
                 if not hit:
+                    options = {"viewport": viewport} if viewport is not None else {}
+                    mask = road_mask(current, settings, active) if settings is not None else None
+                    if cutoff > 0:
+                        gain_mask = layer["values"] > cutoff
+                        mask = gain_mask if mask is None else mask & gain_mask
+                    if mask is not None:
+                        options["cell_mask"] = mask
+                    if map_scale == "linear":
+                        options["map_scale"] = map_scale
                     map_images[key] = active.render(layer["values"], "placement", layer["minimum"],
-                                                   layer["maximum"], display_size=size).getvalue()
+                                                   layer["maximum"], display_size=size, **options).getvalue()
                     if len(map_images) > 16:
                         map_images.popitem(last=False)
                 map_images.move_to_end(key)
-                response = send_file(county_image(current, BytesIO(map_images[key]), active=active), mimetype="image/png", max_age=0)
+                image = BytesIO(map_images[key])
+                if viewport is not None and current.counties is not None:
+                    image = county_layer.clip_image(image, viewport, current.counties)
+                elif viewport is None:
+                    image = county_image(current, image, active=active)
+                response = send_file(image, mimetype="image/png", max_age=0)
             response.headers["X-Map-Cache"] = "HIT" if hit else "MISS"
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -2075,6 +2795,16 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
         current = scenario()
         with current.lock:
             return jsonify(current.best_station(float(request.args["lon"]), float(request.args["lat"])))
+
+    @app.get("/api/roads/background/<int:z>/<int:x>/<int:y>.png")
+    def road_background_tile(z, x, y):
+        categories, reference = background_roads.filters(dict(
+            categories=json.loads(request.args.get("categories", '["E","R","F"]')),
+            reference=request.args.get("reference", "")))
+        counties = (county_layer.selection(json.loads(request.args["counties"]))
+                    if "counties" in request.args else None)
+        return send_file(BytesIO(background_roads.tile(z, x, y, categories, reference, counties)), mimetype="image/png",
+                         max_age=3600)
 
     @app.get("/api/roads/options")
     def road_options():
@@ -2210,12 +2940,15 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
     @app.post("/api/snapshot-data")
     def snapshot_data():
         from station_scenario import export_scenario, restore_scenario
-        from station_snapshot import road_chunks, basin_chunks, coverage_chunks, weather_maps
+        from station_snapshot import road_chunks, basin_chunks, coverage_chunks, weather_maps, placement_map
         if request.headers.get("Origin") not in (None, request.host_url.rstrip("/")):
             return jsonify(error="Eksport fra andre nettsteder er ikke tillatt"), 403
         data = request.get_json()
         if not isinstance(data, dict) or not isinstance(data.get("roads"), dict):
             raise ValueError("Eksporten krever valgte vegfiltre")
+        include_placement = data.get("include_placement", False)
+        if not isinstance(include_placement, bool):
+            raise ValueError("Ugyldig valg av plasseringsgevinst")
         current = scenario()
         with current.lock:
             revision = data.get("revision")
@@ -2229,16 +2962,59 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
         network = roads()
         if not network.metadata["available"]:
             raise ValueError("Vegnett mangler")
-        network.filters(settings)
+        road_scores = data.get("road_scores", True)
+        if not isinstance(road_scores, bool):
+            raise ValueError("Ugyldig valg av vegpoeng")
+        roads_visible = data.get("roads_visible", not road_scores)
+        if not isinstance(roads_visible, bool):
+            raise ValueError("Ugyldig valg av vegnett")
+        display_network = network
+        if not road_scores:
+            categories, reference = background_roads.filters(settings)
+            display_network = RoadNetwork(background_roads.path, cache_dir=OUT / "station_app_cache" / "background_roads")
+            if not display_network.metadata["available"]:
+                raise ValueError("Bakgrunnsvegnett mangler")
+            settings.update(categories=list(categories), reference=reference,
+                            classes=display_network.metadata["classes"])
+        display_network.filters(settings)
         geometry = None if frozen.counties is None else county_layer.geometry(tuple(frozen.counties))
         # All data is prepared from the isolated scenario, never the active viewport.
-        weather_settings = dict(settings, bounds=list(network.geographic_bounds))
+        weather_roads = data.get("weather_roads", data["roads"])
+        if not isinstance(weather_roads, dict):
+            raise ValueError("Ugyldig vegfilter for værkart")
+        weather_settings = {key: value for key, value in weather_roads.items()
+                            if key in ("categories", "classes", "reference", "corridor", "distance_m")}
+        if not isinstance(weather_settings.get("corridor", False), bool):
+            raise ValueError("Ugyldig lagfilter")
+        network.filters(weather_settings)
+        weather_settings.setdefault("distance_m", 1000)
+        weather_settings["bounds"] = list(network.geographic_bounds)
         depth = cold_basins.depth(data.get("depth", 0))
         coverage_classes = coverage.classes(data.get("coverage_classes", []))
         result = dict(revision=revision,
-            weather=weather_maps(frozen, draw, weather_settings, depth, bool(data.get("basins_only"))),
-            roads=road_chunks(network, settings, geometry, frozen.counties),
+            weather=weather_maps(frozen, draw, weather_settings),
+            roads=road_chunks(display_network, settings, geometry, frozen.counties),
             basins=basin_chunks(cold_basins, depth, geometry))
+        if include_placement:
+            result["placement"] = placement_map(frozen, county_image, road_mask, weather_settings)
+        if roads_visible:
+            overview_settings = dict(settings, geometry_only=True)
+            overview_network = display_network
+            if road_scores:
+                overview_network = RoadNetwork(
+                    background_roads.path, cache_dir=OUT / "station_app_cache" / "background_roads")
+                if not overview_network.metadata["available"]:
+                    raise ValueError("Bakgrunnsvegnett mangler")
+                overview_settings.update(
+                    categories=[code for code in settings.get("categories", ["E", "R", "F"])
+                                if code in ("E", "R", "F")],
+                    classes=overview_network.metadata["classes"])
+                overview_network.filters(overview_settings)
+            if frozen.counties is not None:
+                overview_settings.update(_county_key=tuple(frozen.counties), _county_geometry=geometry)
+            result["road_overview"] = overview_network.view(
+                frozen.engine, None, None, frozen.threshold, list(overview_network.geographic_bounds),
+                overview_settings, zoom=4)
         result["coverage"] = (coverage_chunks(coverage, coverage_classes, geometry)
                               if coverage_classes else dict(chunks=[], count=0))
         result["compressed_bytes"] = sum(len(chunk["data"]) * 3 // 4
@@ -2270,35 +3046,49 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
         if not isinstance(data, dict):
             raise ValueError("RMSE-filteret må være et JSON-objekt")
         mode = data.get("mode", "uncertainty")
-        if mode not in ("uncertainty", "baseline", "reduction", "affected"):
+        if mode not in ("uncertainty", "baseline", "affected", "placement"):
             raise ValueError("Ukjent kartlag")
         settings = data.get("roads")
         if settings is not None and not isinstance(settings, dict):
             raise ValueError("Vegfilteret må være et JSON-objekt")
         current = scenario()
         with current.lock:
+            if mode == "placement":
+                layer = current.engine.placement_layer(current.dataset, station_network=current.placement_network())
+                active = current.engine.at_resolution(layer["cell_m"])
+                return jsonify(revision=current.revision,
+                               **cutoff_distribution(layer["values"], road_mask(current, settings, active)))
             values = ((current.reference() if current.network == "frost" else current.base())
                       if mode == "baseline" else current.surface())
             mask = road_mask(current, settings)
-            finite = np.empty(0) if values is None else values[np.isfinite(values) &
-                (np.ones(len(values), dtype=bool) if mask is None else mask)]
-            return jsonify(maximum=float(finite.max()) if len(finite) else 0,
-                           revision=current.revision, cells=len(finite))
+            distribution = cutoff_distribution(values, mask)
+            finite = np.empty(0) if values is None else values[np.isfinite(values) & (True if mask is None else mask)]
+            return jsonify(maximum=float(finite.max()) if len(finite) else 0, revision=current.revision, **distribution)
 
-    @app.get("/api/map.png")
-    def image():
+    @app.get("/api/map.png", defaults={"numeric": False})
+    @app.get("/api/map.bin", defaults={"numeric": True})
+    def image(numeric):
         mode = request.args.get("mode", "uncertainty")
+        map_scale = request.args.get("map_scale", "log")
         display_size = request.args.get("size", type=int)
         if "size" in request.args and display_size not in (400, 800, 1600):
             raise ValueError("Ugyldig bildeoppløsning")
         terrain = mode.startswith("terrain:")
         if not terrain and mode not in ("uncertainty", "baseline", "reduction", "affected"):
             raise ValueError("Ukjent kartlag")
+        if map_scale not in ("log", "linear"):
+            raise ValueError("Ukjent kartskala")
+        if map_scale == "linear" and mode not in ("uncertainty", "baseline", "reduction"):
+            raise ValueError("Lineær kartskala støttes ikke for dette kartlaget")
+        if numeric and (mode not in ("uncertainty", "baseline") or minimum_rmse(request.args.get("rmse_min", 0))):
+            raise ValueError("Tallkart støtter usikkerhetskart uten serverbasert fargegrense")
         current = scenario()
         with current.lock:
+            if map_scale == "linear" and len(current.layers) != 1:
+                raise ValueError("Lineær kartskala støttes for ett værfenomen om gangen")
             if not terrain and len(current.layers) > 1:
                 return combined_image(current, mode, request.args.get("roads"), display_size,
-                                      lake_settings(request.args.get("kuldehull")))
+                                      lake_settings(request.args.get("kuldehull")), numeric)
             if terrain:
                 surface = current.engine.terrain_layer(mode.split(":", 1)[1])["values"]
             elif mode in ("uncertainty", "baseline"):
@@ -2328,29 +3118,33 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             reusable = (current.network == "frost" and mode in ("uncertainty", "baseline") and not current.station_since and current.counties is None and
                         (not current.pross_only or "network_excluded" in current.profile() or not current.masked()) and
                         (mode == "baseline" or (not current.frost_edits and not current.added)) and
-                        settings is None and surface is not None and not rmse_min and not (kuldehull and kuldehull["only"]))
+                        settings is None and surface is not None and not rmse_min and not (kuldehull and kuldehull["only"]) and
+                        map_scale == "log")
             cache_hit = False
             if reusable:
-                key = (id(current.engine), id(current.profile()["baseline"]), display_size, current.limits())
+                key = (id(current.engine), id(current.profile()["baseline"]), display_size, current.limits(), numeric,
+                       map_scale)
                 with image_lock:
                     cache_hit = key in map_images
                     if not cache_hit:
-                        saved = (current.engine.saved_weather_map(current.profile(), display_size, current.limits())
+                        saved = (current.engine.saved_weather_map(current.profile(), display_size, current.limits(),
+                                                                  **({"numeric": True} if numeric else {}))
                                  if hasattr(current.engine, "saved_weather_map") else None)
                         cache_hit = saved is not None
                         map_images[key] = (saved if saved is not None else
-                                           draw(current, surface, mode, display_size=display_size).getvalue())
+                                           draw(current, surface, mode, display_size=display_size, numeric=numeric,
+                                                map_scale=map_scale).getvalue())
                         if len(map_images) > 16:
                             map_images.popitem(last=False)
                     map_images.move_to_end(key)
                     image_data = BytesIO(map_images[key])
             else:
                 saved = None
-                if (not rmse_min and not current.station_since and current.counties is None and settings is None and kuldehull and kuldehull["only"]
+                if (not numeric and not rmse_min and not current.station_since and current.counties is None and settings is None and kuldehull and kuldehull["only"]
                         and current.network == "frost" and mode in ("uncertainty", "baseline")
                         and (not current.pross_only or "network_excluded" in current.profile() or not current.masked())
                         and (mode == "baseline" or (not current.frost_edits and not current.added))
-                        and surface is not None and hasattr(current.engine, "saved_weather_map")):
+                        and surface is not None and hasattr(current.engine, "saved_weather_map") and map_scale == "log"):
                     saved = current.engine.saved_weather_map(current.profile(), display_size, current.limits())
                 if saved is not None:
                     cache_hit = True
@@ -2359,8 +3153,11 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
                         **({"viewport": kuldehull["viewport"]} if "viewport" in kuldehull else {}),
                     )
                 else:
-                    image_data = draw(current, surface, mode, settings, display_size, kuldehull, rmse_min)
-            response = send_file(image_data, mimetype="image/png", max_age=0)
+                    image_data = draw(current, surface, mode, settings, display_size, kuldehull, rmse_min,
+                                      numeric=numeric, map_scale=map_scale)
+            response = send_file(image_data, mimetype="application/octet-stream" if numeric else "image/png", max_age=0)
+            if numeric:
+                response.headers["Content-Encoding"] = "gzip"
             response.headers["X-Map-Cache"] = "HIT" if cache_hit else "MISS"
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -2406,6 +3203,8 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
                 before = current.reference()
                 if targets is not None:
                     before = before[targets]
+            elif current.uses_empty_reference():
+                before = np.full(after.shape, current.empty_reference_rmse, dtype=np.float32)
             reduction = None if before is None else np.maximum(before - after, 0)
             if current.compares_baseline():
                 reduction = before - after
@@ -2450,7 +3249,7 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             raise ValueError("Eksportfilteret må være et JSON-objekt")
         mode = data.get("mode", "uncertainty")
         if mode not in ("uncertainty", "baseline", "reduction", "affected"):
-            raise ValueError("Velg et RMSE-kartlag før eksport")
+            raise ValueError("Velg et usikkerhetskartlag før eksport")
         settings = data.get("roads")
         if settings is not None and not isinstance(settings, dict):
             raise ValueError("Vegfilteret må være et JSON-objekt")
@@ -2459,12 +3258,12 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
         current = scenario()
         with current.lock:
             if not current.ready():
-                raise ValueError("RMSE-kartet er ikke klart for eksport")
+                raise ValueError("Usikkerhetskartet er ikke klart for eksport")
             if data.get("revision") != current.revision:
                 raise ValueError("Scenariet er endret. Prøv eksporten på nytt")
             profile = current.profile()
-            if profile is not None and profile["metric"] != "RMSE":
-                raise ValueError("Velg et RMSE-kartlag før eksport")
+            if profile is not None and profile["metric"] not in ("RMSE", "P95"):
+                raise ValueError("Velg et usikkerhetskartlag før eksport")
             values = ((current.reference() if current.network == "frost" else current.base())
                       if mode == "baseline" else current.surface())
             if values is None:
@@ -2483,13 +3282,14 @@ def create_app(engine, road_network=None, initial_dataset="temperature:continuou
             if current.counties is not None:
                 county_clip = county_layer.polygons(current.counties)
                 clip = county_clip if clip is None else gpd.clip(clip, county_clip.to_crs(clip.crs))
-            result = export_rmse(current.engine, values, threshold, mask, clip,
+            metric = "p95" if profile is not None and profile["metric"] == "P95" else "rmse"
+            result = export_rmse(current.engine, values, threshold, mask, clip, metric=metric,
                 metadata=dict(dataset=current.dataset, mode=mode, revision=current.revision,
                               unit="degrees C" if profile is None else profile["unit"],
                               roads=json.dumps(settings), kuldehull=json.dumps(kuldehull),
                               counties=json.dumps(current.counties), station_since=current.station_since))
             return send_file(result, mimetype="application/geopackage+sqlite3", as_attachment=True,
-                             download_name="norway_rmse.gpkg")
+                             download_name=f"norway_{metric}.gpkg")
 
     @app.get("/api/export")
     def export():
@@ -2521,9 +3321,13 @@ def main():
                         help="Evalueringsrutenett ved oppstart")
     parser.add_argument("--frost-neighbors", type=int, choices=[0], default=0,
                         help="Bare 0 støttes: eksakt minimum over alle kvalifiserte Frost-stasjoner")
+    parser.add_argument("--station-radius-km", type=float, default=100,
+                        help="Station radius cutoff for new/moved stations only; 0 disables it")
     parser.add_argument("--footprint-only", action="store_true",
                         help="Start bare den eksperimentelle native1 km footprint-visningen, uten nasjonale scenarioberegninger")
     args = parser.parse_args()
+    if not np.isfinite(args.station_radius_km) or args.station_radius_km < 0:
+        parser.error("--station-radius-km must be finite and non-negative")
     returned_stage = ASSET_ROOT / "outputs" / "portable_build" / "Remote_500m" / "data"
     if (args.data_root is None and not args.footprint_only and args.cell_m != 1000
             and not (OUT / "portable_weather.json").is_file()
@@ -2567,15 +3371,20 @@ def main():
             backend.close()
         return
     print("Laster terreng, modeller og lagrede flater ...", flush=True)
-    engine = StationEngine(args.surfaces, cell_m=args.cell_m, frost_neighbors=args.frost_neighbors)
+    engine_options = {"station_radius_m": args.station_radius_km * 1000} if args.station_radius_km else {}
+    engine = StationEngine(args.surfaces, cell_m=args.cell_m, frost_neighbors=args.frost_neighbors,
+                           **engine_options)
+    if args.station_radius_km:
+        print(f"Nye/flyttede stasjoner har {args.station_radius_km:g} km radius.", flush=True)
     try:
-        engine.warm_weather_maps(resolutions=(args.cell_m,))
+        initial = default_dataset(engine, args.phenomenon)
+        if args.phenomenon == "temperature" and initial != DIRECT_P95:
+            print("Direct P95-grunnflater mangler; bruker tidligere temperaturmodell.", flush=True)
+        engine.warm_weather_maps(resolutions=(args.cell_m,), dataset=initial)
+        engine.warm_placement_maps()
         cold_basins = KuldehullLayer(OUT / "potential_lakes_norway_DTM10_sill20_tiled" / "potential_lakes.gpkg")
         cold_basins.prepare()
         print(f"Værnett: http://127.0.0.1:{port}", flush=True)
-        initial = PHENOMENON_DATASETS[args.phenomenon]
-        if engine.weather is None or not any(item["id"] == initial for item in engine.weather.available):
-            initial = f"{args.phenomenon}:continuous"
         app = create_app(engine, initial_dataset=initial, kuldehull_layer=cold_basins)
         app.config["SESSION_COOKIE_NAME"] = f"station_lab_{port}"
         app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)

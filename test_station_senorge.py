@@ -12,7 +12,9 @@ import geopandas as gpd
 from shapely import box
 
 from greedy_400_stations_pruned import FEATURES, TERRAIN, make_cache, predict
-from station_senorge import BasinLookup, SeNorgePairModel, PAIR_FEATURES, WARNING, station_cell_features
+from station_senorge import (
+    BasinLookup, SeNorgePairModel, PAIR_FEATURES, WARNING, p95_reference_values, station_cell_features,
+)
 from station_weather import paired_predictions, WeatherRegistry, exact_network
 from test_station_app import FakeWeather, FakeWeatherEngine
 from station_app import Scenario, create_app
@@ -29,6 +31,26 @@ class StationSeNorgeTests(unittest.TestCase):
         for field in TERRAIN:
             frame[field] = [1., 3., 6.]
         return frame
+
+    def test_p95_scores_rmse_winners_and_masks_unsupported_cells(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            grid = self.frame()
+            grid.to_csv(root / "grid.csv.gz", index=False)
+            adapter = SeNorgePairModel.__new__(SeNorgePairModel)
+            adapter.basins = BasinLookup(root / "grid.csv.gz", root / "missing.gpkg")
+            adapter.model = Mock()
+            adapter.model.predict.side_effect = lambda x: 2 + x[:, 0] / 1000
+            cache = make_cache(grid)
+            winners = np.array([0, 0, 0, -1])
+            values = p95_reference_values(adapter, cache, cache, winners, 1500)
+            np.testing.assert_array_equal(values, [0, 3, np.nan, np.nan])
+            np.testing.assert_array_equal(adapter.model.predict.call_args.args[0][:, 0], [0, 1000])
+
+    def test_p95_is_optional_when_no_reference_engine_is_installed(self):
+        client = create_app(FakeWeatherEngine()).test_client()
+        self.assertEqual(client.get("/api/p95/available").json, {"available": False})
+        self.assertEqual(client.get("/api/p95/p95.bin").status_code, 404)
 
     def test_feature_parity_all_prediction_routes_and_identity(self):
         with tempfile.TemporaryDirectory() as temp:

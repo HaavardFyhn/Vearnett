@@ -13,6 +13,44 @@ from test_station_app import FakeEngine
 
 
 class VegScoreTests(unittest.TestCase):
+    def test_municipal_roads_are_excluded_from_cached_dataset_without_changing_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            frame = gpd.GeoDataFrame(dict(
+                linkid=["a", "b", "c"], vegnokkel=["E6", "Kv12", "F17"],
+                roadcategory=["Europaveg", "KommunalVeg", "Fylkesveg"],
+                kommunenavn=["A"]*3, fylkesnr=["03"]*3, istunnel=["0"]*3, isferry=["0"]*3,
+                VS_Total=[10., 20., 30.], VS_Total_klasse=[1., 2., 3.], unused=["unused"]*3,
+                **{field: [1.]*3 for field, _, _ in SCORE_COMPONENTS}),
+                geometry=[LineString([(x, -100), (x, 100)]) for x in [0, 1000, 2000]], crs=25833)
+            for suffix, driver in ((".gdb", "OpenFileGDB"), (".gpkg", "GPKG")):
+                with self.subTest(driver=driver):
+                    source = root / ("roads" + suffix)
+                    pyogrio.write_dataframe(frame, source, layer="Vegnett_VegScore_full", driver=driver)
+                    cache = root / ("cache_" + driver)
+                    roads = RoadNetwork(source, cache_dir=cache)
+                    self.assertEqual(pyogrio.read_info(source)["features"], 3)
+                    self.assertEqual(pyogrio.read_info(roads.path)["features"], 2)
+                    self.assertNotIn("unused", pyogrio.read_info(roads.path)["fields"])
+                    self.assertEqual(set(pyogrio.read_dataframe(roads.path).roadcategory), {"Europaveg", "Fylkesveg"})
+                    self.assertNotIn("K", [item["code"] for item in roads.metadata["categories"]])
+                    with patch("station_roads.pyogrio.write_dataframe", side_effect=AssertionError("Must reuse cache")):
+                        self.assertEqual(RoadNetwork(source, cache_dir=cache).path, roads.path)
+
+    def test_existing_non_municipal_geopackage_is_compacted_without_altering_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "roads.gpkg"
+            frame = gpd.GeoDataFrame(dict(
+                linkid=["a"], vegnokkel=["E6"], roadcategory=["E"], kommunenavn=["A"],
+                istunnel=["0"], isferry=["0"], VS_Total=[10.], VS_Total_klasse=[1.],
+                unused=["not needed"]),
+                geometry=[LineString([(0, 0), (100, 100)])], crs=25833)
+            pyogrio.write_dataframe(frame, path, layer="roads", driver="GPKG")
+            roads = RoadNetwork(path)
+            self.assertIn("unused", pyogrio.read_info(path)["fields"])
+            self.assertNotIn("unused", pyogrio.read_info(roads.path)["fields"])
+            self.assertEqual(roads.metadata["features"], 1)
+
     def test_geodatabase_layer_uses_compact_versioned_spatial_index_cache(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "ProssExport.gdb"
@@ -55,11 +93,11 @@ class VegScoreTests(unittest.TestCase):
             source = root / "data" / "ProssExport.gdb"
             source.parent.mkdir(parents=True)
             frame = gpd.GeoDataFrame(dict(
-                linkid=["full"], vegnokkel=["E6"], roadcategory=["E"],
-                kommunenavn=["A"], fylkesnr=["03"], istunnel=["0"], isferry=["0"],
-                VS_Total=[50.], VS_Total_klasse=[5.],
-                **{field: [1.] for field, _, _ in SCORE_COMPONENTS}),
-                geometry=[LineString([(0, 0), (100, 100)])], crs=25833)
+                linkid=["full", "municipal"], vegnokkel=["E6", "Kv1"], roadcategory=["E", "KommunalVeg"],
+                kommunenavn=["A"]*2, fylkesnr=["03"]*2, istunnel=["0"]*2, isferry=["0"]*2,
+                VS_Total=[50.]*2, VS_Total_klasse=[5.]*2,
+                **{field: [1.]*2 for field, _, _ in SCORE_COMPONENTS}),
+                geometry=[LineString([(0, 0), (100, 100)]), LineString([(200, 0), (300, 100)])], crs=25833)
             pyogrio.write_dataframe(frame, source, layer="Vegnett_VegScore_full", driver="OpenFileGDB")
             stage = Path(folder) / "stage"
             stage.mkdir()
@@ -70,6 +108,9 @@ class VegScoreTests(unittest.TestCase):
             with patch("build_portable.ROOT", root):
                 manifest = prepare_roads(stage)
             self.assertEqual(manifest["layer"], "Vegnett_VegScore_full")
+            self.assertEqual((manifest["features"], manifest["source_features"]), (1, 2))
+            self.assertFalse((stage / "data" / "ProssExport.gdb").exists())
+            self.assertEqual(pyogrio.read_info(source)["features"], 2)
             archive = Path(folder) / "portable.zip"
             with zipfile.ZipFile(archive, "w") as bundle:
                 for path in stage.rglob("*"):
@@ -155,11 +196,11 @@ class VegScoreTests(unittest.TestCase):
             relocated = Path(folder) / "returned"
             shutil.copytree(stage, relocated)
             with patch("build_portable.ROOT", root), \
-                    patch("station_roads.RoadNetwork", side_effect=AssertionError("Must preserve remote caches")):
+                    patch("station_roads.pyogrio.write_dataframe", side_effect=AssertionError("Must preserve remote caches")):
                 self.assertEqual(prepare_roads(relocated, cell_m=500), manifest)
                 legacy = dict(manifest, source_sha256=windows)
                 (relocated / "outputs" / "portable_weather.json").write_text(json.dumps(dict(roads=legacy)))
-                self.assertEqual(prepare_roads(relocated, cell_m=500), legacy)
+                self.assertEqual(prepare_roads(relocated, cell_m=500), manifest)
                 (source / "fingerprint.Z").write_bytes(b"changed")
                 with self.assertRaisesRegex(ValueError, "Road inputs changed"):
                     prepare_roads(relocated, cell_m=500)
@@ -169,6 +210,55 @@ class VegScoreTests(unittest.TestCase):
                 cache_dir=relocated / "outputs" / "station_app_cache" / "roads", portable_cache=True)
             self.assertEqual(original.index_path.name, returned.index_path.name)
             self.assertEqual(original.grid_link_key(FakeEngine()), returned.grid_link_key(FakeEngine()))
+
+    def test_old_500m_stage_is_filtered_for_packaging_without_removing_originals(self):
+        import json
+        import shutil
+        from build_portable import copy_runtime_inputs, prepare_roads, replaced_road_input
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "root"
+            source = root / "data" / "ProssExport.gdb"
+            source.parent.mkdir(parents=True)
+            frame = gpd.GeoDataFrame(dict(
+                linkid=["a", "b"], vegnokkel=["E6", "K1"], roadcategory=["E", "K"],
+                kommunenavn=["A"]*2, fylkesnr=["03"]*2, istunnel=["0"]*2, isferry=["0"]*2,
+                VS_Total=[50.]*2, VS_Total_klasse=[5.]*2),
+                geometry=[LineString([(0, 0), (100, 100)]), LineString([(200, 0), (300, 100)])], crs=25833)
+            pyogrio.write_dataframe(frame, source, layer="Vegnett_VegScore_full", driver="OpenFileGDB")
+            stage = Path(folder) / "stage"
+            with patch("build_portable.ROOT", root):
+                manifest = prepare_roads(stage, cell_m=500)
+            raw = stage / "data" / "Vegnett_VegScore_full.gpkg"
+            pyogrio.write_dataframe(frame, raw, layer="Vegnett_VegScore_full", driver="GPKG")
+            shutil.copytree(source, stage / "data" / "ProssExport.gdb")
+            old = dict(manifest, indexed_source=raw.relative_to(stage).as_posix(), features=2)
+            (stage / "outputs" / "portable_weather.json").write_text(json.dumps(dict(roads=old)))
+            with patch("build_portable.ROOT", root):
+                updated = prepare_roads(stage, cell_m=500)
+            self.assertEqual(updated["features"], 1)
+            self.assertEqual(pyogrio.read_info(raw)["features"], 2)
+            self.assertEqual(pyogrio.read_info(stage / updated["indexed_source"])["features"], 1)
+            network = RoadNetwork(stage / updated["indexed_source"],
+                                  cache_dir=stage / "outputs" / "station_app_cache" / "roads", portable_cache=True)
+            network.prepare_nearest_distances(FakeEngine(), 2000)
+            transient_lock = stage / "outputs" / "placement_direct_p95_work" / "precompute_frost.lock"
+            transient_lock.parent.mkdir(parents=True, exist_ok=True)
+            transient_lock.write_bytes(b"0")
+            packaged = Path(folder) / "packaged"
+            copy_runtime_inputs(stage, packaged)
+            self.assertTrue(transient_lock.is_file())
+            self.assertFalse((packaged / transient_lock.relative_to(stage)).exists())
+            self.assertTrue((packaged / updated["indexed_source"]).is_file())
+            copied = RoadNetwork(packaged / updated["indexed_source"],
+                                 cache_dir=packaged / "outputs" / "station_app_cache" / "roads", portable_cache=True)
+            self.assertIsNotNone(copied.load_nearest_distances(FakeEngine(), 500))
+            self.assertFalse((packaged / "data" / "ProssExport.gdb").exists())
+            self.assertFalse((packaged / "data" / raw.name).exists())
+            self.assertTrue((stage / "data" / "ProssExport.gdb").exists())
+            self.assertTrue(replaced_road_input(Path("data") / "ProssExport.gdb" / "file.gdbtable"))
+            self.assertTrue(replaced_road_input(Path("outputs") / "station_app_cache" / "roads" / "old.gpkg"))
+            self.assertFalse(replaced_road_input(updated["indexed_source"]))
 
     def test_county_hash_selects_attributes_and_clips_prepared_overview(self):
         from shapely.geometry import box

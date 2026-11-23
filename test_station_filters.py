@@ -2,7 +2,9 @@ from io import BytesIO
 import gzip
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from types import MethodType
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -72,6 +74,39 @@ class StationFilterTests(unittest.TestCase):
             self.assertEqual(air.limits(), (0.2, 5., 2))
             self.assertEqual(pavement.limits(), air.limits())
         self.assertNotEqual(pavement.limits(), frost_limits(road_reference))
+
+    def test_temperature_road_calibration_is_fixed_and_configurable(self):
+        from station_app import StationEngine
+        engine = FakeWeatherEngine()
+        profile = engine.weather.profile("temperature:continuous")
+        reference = dict(profile, baseline=np.array([1., 20., 4.]), minimum=.2, frost_maximum=25.)
+        engine.weather = Mock()
+        engine.weather.profile.return_value = profile
+        engine.weather.svv_profile.return_value = reference
+        network = Mock()
+        network.national_corridor_mask.return_value = np.array([True, False, True])
+        engine.root = engine
+        engine.road_calibration_lock = threading.Lock()
+        engine.road_calibration_limits = {}
+        engine.road_network_provider = lambda: network
+        engine.road_colour_limits = MethodType(StationEngine.road_colour_limits, engine)
+        scenario = Scenario(engine)
+        with patch("station_app.ROAD_COLOUR_CALIBRATION_ENABLED", True), \
+                patch("station_app.ROAD_COLOUR_CALIBRATION_DISTANCE_M", 200):
+            expected = tuple(np.percentile([1., 4.], [0.5, 99.5])) + (2,)
+            self.assertEqual(scenario.limits(), expected)
+            scenario.network = "empty"
+            scenario.counties = ["01"]
+            scenario.added = [1]
+            self.assertEqual(scenario.limits(), expected)
+            network.national_corridor_mask.assert_called_once_with(engine, 200)
+        with patch("station_app.ROAD_COLOUR_CALIBRATION_ENABLED", False):
+            self.assertEqual(scenario.limits(), frost_limits(reference))
+        reference["baseline"] = np.array([0., 4., 8.])
+        network.national_corridor_mask.return_value = np.array([True, True, True])
+        with patch("station_app.ROAD_COLOUR_CALIBRATION_ENABLED", True):
+            expected = tuple(np.percentile([4., 8.], [0.5, 99.5])) + (2,)
+            self.assertEqual(scenario.limits(), expected)
 
     def test_svv_reference_uses_its_own_national_baseline_and_requires_precalculation(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -145,8 +180,12 @@ class StationFilterTests(unittest.TestCase):
                          'id="station-date-apply"', 'id="road-corridor"', 'id="rmse-min"',
                          'id="county-options"', 'id="selected-station"', 'id="remove-frost"',
                          'id="kuldehull-picker"', 'id="road-picker"', 'id="station-picker"',
+                         'id="road-show"', 'id="road-score-4"', 'id="road-score-5"', 'Vis vegnett',
+                         'Vis vegscoreklasse 4', 'Vis vegscoreklasse 5',
                          'Alle værstasjoner', 'Vegværstasjoner', 'Værstasjoner', 'gjennomsiktighet'):
             self.assertIn(retained, html)
+        self.assertNotIn('id="road-classes"', html)
+        self.assertNotIn('id="road-score-filters"', html)
 
     def test_station_network_dropdown_switches_svv_all_and_empty_atomically(self):
         client = create_app(FakeWeatherEngine()).test_client()
